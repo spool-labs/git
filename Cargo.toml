@@ -1,0 +1,41 @@
+[package]
+name = "tape-git-remote"
+version = "0.1.0"
+edition = "2021"
+description = "git remote helper that stores repositories on Tapedrive: git clone/pull/push over tape://"
+license = "Apache-2.0"
+
+# Git discovers helpers by name, so a `tape://` url makes it exec `git-remote-tape`.
+[[bin]]
+name = "git-remote-tape"
+path = "src/main.rs"
+
+[workspace]
+
+[dependencies]
+# Tapedrive crates, taken from crates.io like any other dependency.
+#
+# To build against a local checkout of the tape monorepo instead, copy
+# `.cargo/config.toml.example` to `.cargo/config.toml`. Its `[patch.crates-io]`
+# block redirects these seven to relative paths, with no edit here and no change
+# to the lockfile's shape.
+#
+# `tape-sdk` does the verified read and the certified write. The other six exist
+# only to name types that appear in the SDK's signatures but that it does not
+# re-export: `Address`, `TrackNumber`, `ContentType`, `FindTrackVersion`,
+# `track_pda`, and the `HttpApi` / `SolanaRpc` clients it is generic over. If the
+# SDK re-exported those, this example would need one dependency instead of seven.
+tape-sdk = "0.3"
+tape-api = "0.3"
+tape-core = "0.3"
+tape-crypto = "0.3"
+tape-protocol = "0.3"
+rpc-solana = "0.3"
+peer-http = "0.3"
+
+anyhow = "1.0"
+dirs = "5.0"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros"] }
