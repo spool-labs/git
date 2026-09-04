@@ -12,7 +12,6 @@ use tape_core::types::{ContentType, TrackNumber};
 use tape_crypto::ed25519::Keypair;
 use tape_crypto::hash::hash;
 use tape_crypto::prelude::Address;
-use tape_protocol::api::FindTrackVersion;
 use tape_sdk::error::TapedriveError;
 use tape_sdk::keys::helpers::load_ed25519_keypair;
 use tape_sdk::keys::tape_key::TapeKey;
@@ -320,20 +319,15 @@ impl Store {
 
     /// The current ref index, or `None` when nothing has been pushed yet
     pub async fn read_index(&self) -> Result<Option<(Index, TrackNumber)>> {
-        let key = hash(INDEX_NAME.as_bytes());
-        let track = match self
-            .sdk
-            .find_track(&self.bucket, key, FindTrackVersion::Latest)
-            .await
-        {
-            Ok(track) => track,
-            Err(TapedriveError::NotFound) => return Ok(None),
-            Err(error) => return Err(anyhow!("locate ref index: {error}")),
+        // Ref metadata is already indexed on chain. Enumerating the tape avoids
+        // making repository discovery depend on one assigned storage peer being
+        // reachable, while the index bytes themselves still go through the
+        // gateway-and-proof path below.
+        let Some(track) = self.index_versions().await?.last().copied() else {
+            return Ok(None);
         };
-
-        let index = self.read_index_at(track.track_number).await?;
-
-        Ok(Some((index, track.track_number)))
+        let index = self.read_index_at(track).await?;
+        Ok(Some((index, track)))
     }
 
     /// Read a specific version of the ref index

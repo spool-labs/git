@@ -11,22 +11,24 @@
 # that are not published yet: Cargo reads the version out of each local
 # `Cargo.toml` and never asks the index. The version requirements in Cargo.toml
 # still have to be satisfiable by what is on disk, so if the monorepo's
-# `[workspace.package] version` moves past 0.3, bump them together.
+# `[workspace.package] version` moves past 0.4, bump them together.
 #
-# Paths are relative to this file's parent directory, which is the crate root.
-# The default below assumes:
+# Paths are relative to the crate root. The default below assumes:
 #
-#   <somewhere>/tape-public/examples/tape-git-remote/   <- you are here
-#   <somewhere>/tape-internal/                          <- the monorepo
+#   <somewhere>/tapedrive/git/       <- you are here
+#   <somewhere>/tapedrive/runtime/   <- the runtime monorepo
 #
 # Adjust if your checkouts sit elsewhere. `.cargo/config.toml` itself is
 # gitignored, so your local paths never end up in a commit.
 
+[net]
+git-fetch-with-cli = true
+
 [patch.crates-io]
-tape-sdk = { path = "../../../tape-internal/sdk" }
-tape-api = { path = "../../../tape-internal/solana/api" }
-tape-core = { path = "../../../tape-internal/lib/core" }
-tape-crypto = { path = "../../../tape-internal/lib/crypto" }
-tape-protocol = { path = "../../../tape-internal/network/protocol" }
-rpc-solana = { path = "../../../tape-internal/solana/rpc-solana" }
-peer-http = { path = "../../../tape-internal/network/peer-http" }
+tape-sdk = { path = "../runtime/sdk" }
+tape-api = { path = "../runtime/solana/api" }
+tape-core = { path = "../runtime/lib/core" }
+tape-crypto = { path = "../runtime/lib/crypto" }
+tape-protocol = { path = "../runtime/network/protocol" }
+rpc-solana = { path = "../runtime/solana/rpc-solana" }
+peer-http = { path = "../runtime/network/peer-http" }

@@ -99,6 +99,20 @@ tape: fetching pack 1 (219745 bytes)
 
 `git ls-remote tape://<bucket>` also works, if you just want to see the refs.
 
+Services that need the same readiness gate can use the library without parsing
+Git's line protocol:
+
+```rust,ignore
+if let Some(repository) = tape_git_remote::probe_cloneable(tape_address).await? {
+    // HEAD and the advertised refs were read and verified from Tapedrive.
+    println!("{}", repository.head);
+}
+```
+
+The function returns `None` until a coherent HEAD/ref index exists. This is the
+homepage demo's gate for revealing a `tape://` URL; publication success alone is
+not treated as proof that a fresh reader can resolve it.
+
 Reading is open because the devnet nodes publish an `access_threshold` of zero.
 Writing is gated by custody of the tape keypair. So the asymmetry is simple:
 anyone reads, only the key holder writes.

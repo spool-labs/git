@@ -25,17 +25,21 @@ path = "src/main.rs"
 # re-export: `Address`, `TrackNumber`, `ContentType`, `FindTrackVersion`,
 # `track_pda`, and the `HttpApi` / `SolanaRpc` clients it is generic over. If the
 # SDK re-exported those, this example would need one dependency instead of seven.
-tape-sdk = "0.3"
-tape-api = "0.3"
-tape-core = "0.3"
-tape-crypto = "0.3"
-tape-protocol = "0.3"
-rpc-solana = "0.3"
-peer-http = "0.3"
+tape-sdk = "0.4"
+tape-api = "0.4"
+tape-core = "0.4"
+tape-crypto = "0.4"
+tape-protocol = "0.4"
+rpc-solana = "0.4"
+peer-http = "0.4"
 
 anyhow = "1.0"
 dirs = "5.0"
 hex = "0.4"
+# Keep the x86_64 Linux helper build self-contained when cross-compiling from
+# an arm64 development host. This unifies the native-tls OpenSSL feature used
+# transitively by the Tapedrive SDK.
+openssl = { version = "0.10", features = ["vendored"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.37", features = ["rt-multi-thread", "macros"] }
