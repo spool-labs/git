@@ -36,6 +36,11 @@ const INDEX_CONTENT_TYPE: &str = "application/json";
 /// seconds.
 const READ_BACKOFF_MS: [u64; 6] = [400, 800, 1_600, 3_200, 6_000, 0];
 
+/// Backoff while a freshly created tape propagates to the RPC reader used by
+/// this process.
+const ACCOUNT_PROPAGATION_BACKOFF_MS: [u64; 8] =
+    [500, 1_000, 2_000, 4_000, 5_000, 5_000, 5_000, 0];
+
 /// How many times to re-try a gateway fetch that came back rate limited
 const GATEWAY_RATE_LIMIT_RETRIES: u64 = 3;
 
@@ -343,6 +348,31 @@ impl Store {
     /// what lets a pusher notice it raced with someone: there is no
     /// compare-and-swap to lean on, but nothing is ever actually lost either.
     pub async fn index_versions(&self) -> Result<Vec<TrackNumber>> {
+        let mut last_error = None;
+        for (attempt, backoff) in ACCOUNT_PROPAGATION_BACKOFF_MS.iter().enumerate() {
+            match self.index_versions_once().await {
+                Ok(versions) => return Ok(versions),
+                Err(error)
+                    if is_account_propagation_error(&error)
+                        && attempt + 1 < ACCOUNT_PROPAGATION_BACKOFF_MS.len() =>
+                {
+                    eprintln!(
+                        "tape: tape account is not visible yet; retrying in {backoff}ms"
+                    );
+                    tokio::time::sleep(Duration::from_millis(*backoff)).await;
+                    last_error = Some(error);
+                }
+                Err(error) => return Err(anyhow!("list index versions: {error}")),
+            }
+        }
+
+        match last_error {
+            Some(error) => Err(anyhow!("list index versions: {error}")),
+            None => Err(anyhow!("list index versions: no attempt made")),
+        }
+    }
+
+    async fn index_versions_once(&self) -> Result<Vec<TrackNumber>, TapedriveError> {
         let key = hash(INDEX_NAME.as_bytes());
         let mut versions = Vec::new();
         let mut cursor = None;
@@ -351,8 +381,7 @@ impl Store {
             let (tracks, next) = self
                 .sdk
                 .list_tracks_by_tape(&self.bucket, cursor, TRACK_PAGE_SIZE)
-                .await
-                .map_err(|error| anyhow!("list index versions: {error}"))?;
+                .await?;
 
             for track in &tracks {
                 if track.key == key {
@@ -441,5 +470,26 @@ impl Store {
             .map_err(|error| anyhow!("write ref index: {error}"))?;
 
         Ok(track.track_number)
+    }
+}
+
+fn is_account_propagation_error(error: &TapedriveError) -> bool {
+    matches!(error, TapedriveError::Rpc(error) if is_account_propagation_category(error.category()))
+}
+
+fn is_account_propagation_category(category: &str) -> bool {
+    category == "not_found"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_missing_accounts_use_the_propagation_retry() {
+        assert!(is_account_propagation_category("not_found"));
+        assert!(!is_account_propagation_category("rpc_error"));
+        assert!(!is_account_propagation_category("timeout"));
+        assert!(!is_account_propagation_category("tx_error"));
     }
 }
