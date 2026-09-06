@@ -409,6 +409,22 @@ impl Store {
     pub async fn read_pack(&self, entry: &PackEntry) -> Result<Vec<u8>> {
         let track = TrackNumber(entry.track);
 
+        if entry.stream {
+            let address = track_pda(self.bucket, track).0;
+            let bytes = self
+                .sdk
+                .read_bytes(&address)
+                .await
+                .map_err(|error| anyhow!("read pack stream at track {}: {error}", entry.track))?;
+            if !entry.matches(&bytes) {
+                bail!(
+                    "pack stream at track {} does not match the digest the index recorded",
+                    entry.track
+                );
+            }
+            return Ok(bytes);
+        }
+
         if let Some(bytes) = self.gateway_bytes(track).await {
             if entry.matches(&bytes) {
                 return Ok(bytes);
@@ -448,6 +464,7 @@ impl Store {
             track: track.track_number.0,
             size: pack.len() as u64,
             digest: digest(pack),
+            stream: false,
         })
     }
 
@@ -486,7 +503,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_missing_accounts_use_the_propagation_retry() {
+    fn propagation_retry() {
         assert!(is_account_propagation_category("not_found"));
         assert!(!is_account_propagation_category("rpc_error"));
         assert!(!is_account_propagation_category("timeout"));

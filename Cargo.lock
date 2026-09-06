@@ -2837,7 +2837,6 @@ dependencies = [
  "tape-core",
  "tape-crypto",
  "tape-protocol",
- "tape-store",
  "wincode 0.1.2",
 ]
 
@@ -3247,15 +3246,6 @@ dependencies = [
  "getrandom 0.2.17",
  "libredox",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "reel-core"
-version = "0.1.0"
-source = "git+https://github.com/spool-labs/reel.git?branch=main#1bbc470c74a4d8236f994da597cb8dccf640cf82"
-dependencies = [
- "thiserror 2.0.19",
- "wincode 0.1.2",
 ]
 
 [[package]]
@@ -5939,24 +5929,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
-name = "store"
-version = "0.4.0"
-dependencies = [
- "reel-core",
- "serde",
- "thiserror 2.0.19",
- "wincode 0.1.2",
-]
-
-[[package]]
-name = "store-memory"
-version = "0.4.0"
-dependencies = [
- "store",
- "thiserror 2.0.19",
-]
-
-[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6151,6 +6123,7 @@ dependencies = [
  "tape-crypto",
  "tape-protocol",
  "tape-sdk",
+ "tempfile",
  "tokio",
 ]
 
@@ -6281,21 +6254,6 @@ dependencies = [
  "spl-associated-token-account",
  "spl-token",
  "thiserror 2.0.19",
-]
-
-[[package]]
-name = "tape-store"
-version = "0.4.0"
-dependencies = [
- "serde",
- "store",
- "store-memory",
- "tape-api",
- "tape-core",
- "tape-crypto",
- "thiserror 2.0.19",
- "wincode 0.1.2",
- "wincode-derive 0.1.1",
 ]
 
 [[package]]

@@ -2,12 +2,13 @@ use std::io::{BufRead, Lines, Write};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::store::Store;
+use crate::{git::Repository, store::Store};
 
 const URL_SCHEME: &str = "tape://";
 
 pub async fn run_from_env() -> Result<()> {
     let store = Store::open(&bucket_from_args()?)?;
+    let repository = Repository::current()?;
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     let mut out = std::io::stdout();
@@ -27,12 +28,12 @@ pub async fn run_from_env() -> Result<()> {
             out.flush()?;
         } else if command.starts_with("fetch ") {
             drain_batch(&mut lines)?;
-            crate::fetch::fetch(&store).await?;
+            crate::fetch::fetch(&store, &repository).await?;
             writeln!(out)?;
             out.flush()?;
         } else if let Some(first) = command.strip_prefix("push ") {
             let specs = collect_batch(&mut lines, first, "push ")?;
-            crate::push::push(&store, &specs, &mut out).await?;
+            crate::push::push(&store, &repository, &specs, &mut out).await?;
         } else {
             bail!("unsupported command from git: `{command}`");
         }

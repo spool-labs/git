@@ -60,6 +60,14 @@ pub struct PackEntry {
     /// renamed still load.
     #[serde(alias = "sha256")]
     pub digest: String,
+
+    /// Whether the track is a stream manifest rather than a direct blob.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stream: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl PackEntry {
@@ -165,6 +173,7 @@ mod tests {
             track,
             size: bytes.len() as u64,
             digest: digest(bytes),
+            stream: false,
         }
     }
 

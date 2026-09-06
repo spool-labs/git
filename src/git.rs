@@ -6,8 +6,10 @@
 //! signatures, and merge topology.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::thread::JoinHandle;
 
 use anyhow::{bail, Context, Result};
 
@@ -17,57 +19,200 @@ const PACK_SIGNATURE: [u8; 4] = *b"PACK";
 const PACK_HEADER_BYTES: usize = 12;
 const PACK_COUNT_OFFSET: usize = 8;
 
-fn capture(args: &[&str]) -> Result<Output> {
-    Command::new("git")
-        .args(args)
-        .stderr(Stdio::piped())
-        .output()
-        .with_context(|| format!("spawn git {}", args.join(" ")))
+#[derive(Clone, Debug)]
+pub struct Repository {
+    root: PathBuf,
 }
 
-/// Run git and require success, returning trimmed stdout
-pub fn git(args: &[&str]) -> Result<String> {
-    let output = capture(args)?;
-    if !output.status.success() {
-        bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+impl Repository {
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
 
-/// The repository git invoked us for
-pub fn git_dir() -> Result<PathBuf> {
-    Ok(PathBuf::from(git(&["rev-parse", "--absolute-git-dir"])?))
-}
-
-/// Resolve a revision to a full object id, or `None` when it does not exist
-pub fn rev_parse(revision: &str) -> Option<String> {
-    let output = capture(&["rev-parse", "--verify", "--quiet", revision]).ok()?;
-    if !output.status.success() {
-        return None;
+    pub fn current() -> Result<Self> {
+        Ok(Self::at(std::env::current_dir().context("current directory")?))
     }
-    let object_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!object_id.is_empty()).then_some(object_id)
-}
 
-/// Whether the object is present locally
-///
-/// Fast-forward checks are meaningless against an object we do not have, so
-/// callers use this to decide when to demand a force push instead of guessing.
-pub fn has_object(object_id: &str) -> bool {
-    capture(&["cat-file", "-e", &format!("{object_id}^{{object}}")])
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 
-/// Whether `old` is reachable from `new`, meaning the update fast-forwards
-pub fn is_ancestor(old: &str, new: &str) -> bool {
-    capture(&["merge-base", "--is-ancestor", old, new])
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    fn command(&self) -> Command {
+        let mut command = Command::new("git");
+        command
+            .current_dir(&self.root)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0");
+        command
+    }
+
+    fn capture(&self, args: &[&str]) -> Result<Output> {
+        self.command()
+            .args(args)
+            .stderr(Stdio::piped())
+            .output()
+            .with_context(|| format!("spawn git {}", args.join(" ")))
+    }
+
+    /// Run git and require success, returning trimmed stdout.
+    pub fn git(&self, args: &[&str]) -> Result<String> {
+        let output = self.capture(args)?;
+        if !output.status.success() {
+            bail!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    pub fn git_dir(&self) -> Result<PathBuf> {
+        Ok(PathBuf::from(
+            self.git(&["rev-parse", "--absolute-git-dir"])?
+        ))
+    }
+
+    /// Resolve a revision to a full object id, or `None` when it does not exist.
+    pub fn rev_parse(&self, revision: &str) -> Option<String> {
+        let output = self
+            .capture(&["rev-parse", "--verify", "--quiet", revision])
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let object_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!object_id.is_empty()).then_some(object_id)
+    }
+
+    /// Whether the object is present locally.
+    pub fn has_object(&self, object_id: &str) -> bool {
+        self.capture(&["cat-file", "-e", &format!("{object_id}^{{object}}")])
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    pub fn is_ancestor(&self, old: &str, new: &str) -> bool {
+        self.capture(&["merge-base", "--is-ancestor", old, new])
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Local branches and their tips. Remote-tracking refs stay implementation
+    /// details; a normal clone publishes its checked-out branch and full history.
+    pub fn branches(&self) -> Result<BTreeMap<String, String>> {
+        let lines = self.git(&[
+            "for-each-ref",
+            "--format=%(refname)%00%(objectname)",
+            "refs/heads",
+        ])?;
+        let mut refs = BTreeMap::new();
+        for line in lines.lines() {
+            let (name, object) = line
+                .split_once('\0')
+                .context("git returned an invalid branch record")?;
+            refs.insert(name.to_owned(), object.to_owned());
+        }
+        if refs.is_empty() {
+            bail!("repository has no branches to publish");
+        }
+        Ok(refs)
+    }
+
+    pub fn head_ref(&self) -> Result<String> {
+        self.git(&["symbolic-ref", "HEAD"])
+    }
+
+    /// Write bounded packfiles containing every object reachable from a ref.
+    pub fn pack_all(&self, directory: &Path) -> Result<Vec<PathBuf>> {
+        std::fs::create_dir_all(directory)
+            .with_context(|| format!("create pack directory {}", directory.display()))?;
+        let directory = std::fs::canonicalize(directory)
+            .with_context(|| format!("resolve pack directory {}", directory.display()))?;
+        let prefix = directory.join("pack");
+        let prefix = prefix
+            .to_str()
+            .context("pack directory is not valid UTF-8")?;
+        self.git(&[
+            "pack-objects",
+            "--all",
+            "--max-pack-size=48m",
+            prefix,
+        ])?;
+        let mut packs = std::fs::read_dir(&directory)
+            .with_context(|| format!("read pack directory {}", directory.display()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "pack"))
+            .collect::<Vec<_>>();
+        packs.sort();
+        if packs.is_empty() {
+            bail!("git did not produce a packfile");
+        }
+        Ok(packs)
+    }
+
+    /// Build a self-contained pack for the requested revisions.
+    pub fn pack_objects(&self, include: &[String], exclude: &[String]) -> Result<Vec<u8>> {
+        let mut child = self
+            .command()
+            .args([
+                "pack-objects",
+                "--stdout",
+                "--revs",
+                "--delta-base-offset",
+                "--quiet",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("spawn git pack-objects")?;
+
+        let mut revisions = String::new();
+        for object_id in include {
+            revisions.push_str(object_id);
+            revisions.push('\n');
+        }
+        for object_id in exclude {
+            revisions.push('^');
+            revisions.push_str(object_id);
+            revisions.push('\n');
+        }
+
+        let writer = write_stdin(&mut child, revisions.into_bytes(), "git pack-objects")?;
+        let output = wait(child, writer, "git pack-objects")?;
+        if !output.status.success() {
+            bail!(
+                "git pack-objects failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(output.stdout)
+    }
+
+    /// Install a packfile into this repository.
+    pub fn index_pack(&self, pack: &[u8]) -> Result<()> {
+        let mut child = self
+            .command()
+            .args(["index-pack", "--stdin", "--fix-thin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("spawn git index-pack")?;
+
+        let writer = write_stdin(&mut child, pack.to_vec(), "git index-pack")?;
+        let output = wait(child, writer, "git index-pack")?;
+        if !output.status.success() {
+            bail!(
+                "git index-pack failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Number of objects a packfile carries, read from its header
@@ -84,89 +229,30 @@ pub fn pack_object_count(pack: &[u8]) -> u64 {
     u64::from(u32::from_be_bytes(count))
 }
 
-/// Feed `input` to a child's stdin from another thread
-///
-/// The child's output can outgrow the pipe buffer, so writing inline would
-/// deadlock us against our own unread stdout.
-fn write_stdin_detached(child: &mut Child, input: Vec<u8>, what: &str) -> Result<()> {
+/// Feed input while the owner drains output, and return a handle that must be joined.
+fn write_stdin(child: &mut Child, input: Vec<u8>, what: &str) -> Result<JoinHandle<Result<()>>> {
     let mut stdin = child
         .stdin
         .take()
         .with_context(|| format!("{what} stdin was not piped"))?;
+    let what = what.to_owned();
 
-    std::thread::spawn(move || {
-        let _ = stdin.write_all(&input);
-    });
-
-    Ok(())
+    Ok(std::thread::spawn(move || {
+        stdin
+            .write_all(&input)
+            .with_context(|| format!("write {what} stdin"))
+    }))
 }
 
-/// Build a packfile holding everything reachable from `include` that is not
-/// already reachable from `exclude`
-///
-/// Deliberately not `--thin`. Every pack must resolve its own deltas so a clone
-/// can replay packs in push order without later ones depending on objects an
-/// earlier read might have missed.
-pub fn pack_objects(include: &[String], exclude: &[String]) -> Result<Vec<u8>> {
-    let mut child = Command::new("git")
-        .args([
-            "pack-objects",
-            "--stdout",
-            "--revs",
-            "--delta-base-offset",
-            "--quiet",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawn git pack-objects")?;
-
-    let mut revisions = String::new();
-    for object_id in include {
-        revisions.push_str(object_id);
-        revisions.push('\n');
+fn wait(child: Child, writer: JoinHandle<Result<()>>, what: &str) -> Result<Output> {
+    let output = child.wait_with_output().with_context(|| what.to_owned())?;
+    match writer.join() {
+        Ok(result) if output.status.success() => result?,
+        Ok(_) => {}
+        Err(_) if output.status.success() => bail!("{what} stdin writer panicked"),
+        Err(_) => {}
     }
-    for object_id in exclude {
-        revisions.push('^');
-        revisions.push_str(object_id);
-        revisions.push('\n');
-    }
-
-    write_stdin_detached(&mut child, revisions.into_bytes(), "git pack-objects")?;
-
-    let output = child.wait_with_output().context("git pack-objects")?;
-    if !output.status.success() {
-        bail!(
-            "git pack-objects failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    Ok(output.stdout)
-}
-
-/// Install a packfile into the repository, making its objects available to git
-pub fn index_pack(pack: &[u8]) -> Result<()> {
-    let mut child = Command::new("git")
-        .args(["index-pack", "--stdin", "--fix-thin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawn git index-pack")?;
-
-    write_stdin_detached(&mut child, pack.to_vec(), "git index-pack")?;
-
-    let output = child.wait_with_output().context("git index-pack")?;
-    if !output.status.success() {
-        bail!(
-            "git index-pack failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    Ok(())
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -203,5 +289,41 @@ mod tests {
         assert_eq!(pack_object_count(b"PAC"), 0);
         assert_eq!(pack_object_count(&[]), 0);
         assert_eq!(pack_object_count(b"NOPEnope\0\0\0\x05"), 0);
+    }
+
+    #[test]
+    fn pack_export() {
+        let current = std::env::current_dir().unwrap();
+        let temporary = tempfile::Builder::new()
+            .prefix("pack-export-")
+            .tempdir_in(&current)
+            .unwrap();
+        let root = temporary
+            .path()
+            .strip_prefix(&current)
+            .unwrap()
+            .join("repository");
+        assert!(!root.is_absolute());
+        std::fs::create_dir(&root).unwrap();
+        let repository = Repository::at(&root);
+        repository.git(&["init", "-b", "main"]).unwrap();
+        repository
+            .git(&["config", "user.name", "agent-1"])
+            .unwrap();
+        repository
+            .git(&["config", "user.email", "agent-1@ai.tape.network"])
+            .unwrap();
+        std::fs::write(root.join("index.html"), "hello").unwrap();
+        repository.git(&["add", "index.html"]).unwrap();
+        repository.git(&["commit", "-m", "add page"]).unwrap();
+
+        let packs = repository
+            .pack_all(&temporary.path().join("packs"))
+            .unwrap();
+
+        assert_eq!(repository.head_ref().unwrap(), "refs/heads/main");
+        assert!(repository.branches().unwrap().contains_key("refs/heads/main"));
+        assert_eq!(packs.len(), 1);
+        assert!(pack_object_count(&std::fs::read(&packs[0]).unwrap()) > 0);
     }
 }

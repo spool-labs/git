@@ -14,7 +14,7 @@ use anyhow::{bail, Result};
 use tape_core::types::TrackNumber;
 
 use crate::fetch::{load_installed, save_installed};
-use crate::git;
+use crate::git::{self, Repository};
 use crate::index::{Index, PackEntry};
 use crate::store::Store;
 
@@ -78,7 +78,7 @@ pub fn parse_specs(specs: &[String]) -> Vec<Spec> {
 }
 
 /// Decide one refspec against `index`
-fn decide_spec(spec: &Spec, index: &Index, decision: &mut Decision) {
+fn decide_spec(repository: &Repository, spec: &Spec, index: &Index, decision: &mut Decision) {
     if let Some(bad) = &spec.malformed {
         decision.results.push(format!("error {bad} malformed refspec"));
         return;
@@ -91,7 +91,7 @@ fn decide_spec(spec: &Spec, index: &Index, decision: &mut Decision) {
         return;
     }
 
-    let Some(new_id) = git::rev_parse(&spec.source) else {
+    let Some(new_id) = repository.rev_parse(&spec.source) else {
         decision.results.push(format!(
             "error {destination} no such ref locally: {}",
             spec.source
@@ -107,19 +107,19 @@ fn decide_spec(spec: &Spec, index: &Index, decision: &mut Decision) {
         // Someone advanced this ref past us while we were working. Our objects are
         // already stored and the remote tip contains our commit, so the push
         // succeeded, and moving the ref backwards would be wrong.
-        if git::has_object(old_id) && git::is_ancestor(&new_id, old_id) {
+        if repository.has_object(old_id) && repository.is_ancestor(&new_id, old_id) {
             decision.results.push(format!("ok {destination}"));
             return;
         }
         if !spec.is_forced {
-            if !git::has_object(old_id) {
+            if !repository.has_object(old_id) {
                 decision.results.push(format!(
                     "error {destination} remote is at {old_id}, which is not in \
                      this repository; fetch first"
                 ));
                 return;
             }
-            if !git::is_ancestor(old_id, &new_id) {
+            if !repository.is_ancestor(old_id, &new_id) {
                 decision
                     .results
                     .push(format!("error {destination} non-fast-forward"));
@@ -139,11 +139,11 @@ fn decide_spec(spec: &Spec, index: &Index, decision: &mut Decision) {
 /// newer base *is* the conflict merge, because every check gets re-evaluated
 /// against whatever the other pusher left behind: fast-forward, already-there,
 /// superseded.
-pub fn decide(specs: &[Spec], index: &Index) -> Decision {
+pub fn decide(repository: &Repository, specs: &[Spec], index: &Index) -> Decision {
     let mut decision = Decision::default();
 
     for spec in specs {
-        decide_spec(spec, index, &mut decision);
+        decide_spec(repository, spec, index, &mut decision);
     }
 
     decision
@@ -181,8 +181,8 @@ pub fn is_satisfied(index: &Index, decision: &Decision, pack: Option<&PackEntry>
 /// recent pusher happened to be standing on, because that would change what
 /// everyone else's next clone checks out. The first push seeds it from the local
 /// HEAD. After that it is sticky, and moving it is a deliberate act.
-fn choose_head(index: &Index) -> Option<String> {
-    if let Ok(local) = git::git(&["symbolic-ref", "HEAD"]) {
+fn choose_head(repository: &Repository, index: &Index) -> Option<String> {
+    if let Ok(local) = repository.git(&["symbolic-ref", "HEAD"]) {
         if index.refs.contains_key(&local) {
             return Some(local);
         }
@@ -204,7 +204,12 @@ fn choose_head(index: &Index) -> Option<String> {
 }
 
 /// Fold a decision into an index
-pub fn apply(index: &mut Index, decision: &Decision, pack: Option<&PackEntry>) {
+pub fn apply(
+    repository: &Repository,
+    index: &mut Index,
+    decision: &Decision,
+    pack: Option<&PackEntry>,
+) {
     for name in &decision.deletions {
         index.refs.remove(name);
     }
@@ -222,7 +227,7 @@ pub fn apply(index: &mut Index, decision: &Decision, pack: Option<&PackEntry>) {
         None => false,
     };
     if !is_head_live {
-        index.head = choose_head(index);
+        index.head = choose_head(repository, index);
     }
 }
 
@@ -232,6 +237,7 @@ pub fn apply(index: &mut Index, decision: &Decision, pack: Option<&PackEntry>) {
 /// retry only changes ref bookkeeping, never which objects have to exist.
 async fn store_pack(
     store: &Store,
+    repository: &Repository,
     base: &Index,
     decision: &Decision,
 ) -> Result<Option<PackEntry>> {
@@ -244,12 +250,12 @@ async fn store_pack(
     // object". Dropping it just re-sends objects the remote already has.
     let mut exclude = Vec::new();
     for object_id in base.tips() {
-        if git::has_object(&object_id) {
+        if repository.has_object(&object_id) {
             exclude.push(object_id);
         }
     }
 
-    let pack = git::pack_objects(&decision.include, &exclude)?;
+    let pack = repository.pack_objects(&decision.include, &exclude)?;
     let objects = git::pack_object_count(&pack);
     if objects == 0 {
         return Ok(None);
@@ -266,9 +272,9 @@ async fn store_pack(
     // We built this pack from local objects, so we already have every object in
     // it. Recording it as installed stops the next `git pull` in this repo from
     // downloading our own push back again.
-    let mut installed = load_installed();
+    let mut installed = load_installed(repository);
     installed.insert(store.installed_key(entry.track));
-    save_installed(&installed)?;
+    save_installed(repository, &installed)?;
 
     Ok(Some(entry))
 }
@@ -276,6 +282,7 @@ async fn store_pack(
 /// Publish the index, re-merging until the visible head reflects our changes
 async fn publish(
     store: &Store,
+    repository: &Repository,
     specs: &[Spec],
     pack: Option<&PackEntry>,
 ) -> Result<Vec<String>> {
@@ -304,7 +311,7 @@ async fn publish(
         // Deciding against their version is the merge: their refs and packs are
         // already in `index`, so our fast-forward checks run against reality and
         // `apply` layers our updates on top rather than replacing them.
-        let decision = decide(specs, &index);
+        let decision = decide(repository, specs, &index);
         results = decision.results.clone();
 
         let visible = match head_version {
@@ -320,7 +327,7 @@ async fn publish(
         // are immutable and someone's objects depend on them.
         index.absorb_packs(&visible);
 
-        apply(&mut index, &decision, pack);
+        apply(repository, &mut index, &decision, pack);
         index.parent = base_version.map(|track| track.0);
         let written = store.write_index(&index).await?;
         ours.push(written);
@@ -356,7 +363,12 @@ async fn publish(
 }
 
 /// Handle git's `push` batch
-pub async fn push(store: &Store, specs: &[String], out: &mut impl Write) -> Result<()> {
+pub async fn push(
+    store: &Store,
+    repository: &Repository,
+    specs: &[String],
+    out: &mut impl Write,
+) -> Result<()> {
     // Fail before doing any work. Packing a repository and then discovering we
     // have no key to write with wastes the user's time and reads like a crash.
     store.writable()?;
@@ -367,8 +379,8 @@ pub async fn push(store: &Store, specs: &[String], out: &mut impl Write) -> Resu
         None => Index::default(),
     };
 
-    let pack = store_pack(store, &base, &decide(&parsed, &base)).await?;
-    let results = publish(store, &parsed, pack.as_ref()).await?;
+    let pack = store_pack(store, repository, &base, &decide(repository, &parsed, &base)).await?;
+    let results = publish(store, repository, &parsed, pack.as_ref()).await?;
 
     for line in results {
         writeln!(out, "{line}")?;
@@ -387,6 +399,10 @@ mod tests {
         let mut index = Index::default();
         index.refs.insert(name.to_string(), object_id.to_string());
         index
+    }
+
+    fn repository() -> Repository {
+        Repository::at(env!("CARGO_MANIFEST_DIR"))
     }
 
     // a plain refspec splits into source and destination
@@ -412,7 +428,11 @@ mod tests {
     #[test]
     fn delete_refspec() {
         let parsed = parse_specs(&[":refs/heads/gone".to_string()]);
-        let decision = decide(&parsed, &index_with("refs/heads/gone", &"a".repeat(40)));
+        let decision = decide(
+            &repository(),
+            &parsed,
+            &index_with("refs/heads/gone", &"a".repeat(40)),
+        );
 
         assert_eq!(decision.deletions, vec!["refs/heads/gone".to_string()]);
         assert_eq!(decision.results, vec!["ok refs/heads/gone".to_string()]);
@@ -422,7 +442,7 @@ mod tests {
     #[test]
     fn malformed_refspec() {
         let parsed = parse_specs(&["nonsense".to_string()]);
-        let decision = decide(&parsed, &Index::default());
+        let decision = decide(&repository(), &parsed, &Index::default());
 
         assert!(decision.updates.is_empty());
         assert!(decision.results[0].starts_with("error nonsense"));
@@ -432,7 +452,7 @@ mod tests {
     #[test]
     fn missing_source() {
         let parsed = parse_specs(&["refs/heads/nope-not-here:refs/heads/x".to_string()]);
-        let decision = decide(&parsed, &Index::default());
+        let decision = decide(&repository(), &parsed, &Index::default());
 
         assert!(decision.updates.is_empty());
         assert!(decision.results[0].contains("no such ref locally"));
@@ -477,7 +497,7 @@ mod tests {
         index.head = Some("refs/heads/release".to_string());
 
 
-        apply(&mut index, &Decision::default(), None);
+        apply(&repository(), &mut index, &Decision::default(), None);
 
         assert_eq!(index.head.as_deref(), Some("refs/heads/release"));
     }
@@ -488,7 +508,7 @@ mod tests {
         let mut index = index_with("refs/heads/main", &"f".repeat(40));
         index.head = Some("refs/heads/deleted".to_string());
 
-        apply(&mut index, &Decision::default(), None);
+        apply(&repository(), &mut index, &Decision::default(), None);
 
         assert_eq!(index.head.as_deref(), Some("refs/heads/main"));
     }

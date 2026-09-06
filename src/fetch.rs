@@ -10,22 +10,22 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::git;
+use crate::git::{self, Repository};
 use crate::store::Store;
 
 /// File under the git directory recording which packs are already installed
 const INSTALLED_PACKS: &str = "tape/installed-packs";
 
-fn installed_path() -> Result<PathBuf> {
-    Ok(git::git_dir()?.join(INSTALLED_PACKS))
+fn installed_path(repository: &Repository) -> Result<PathBuf> {
+    Ok(repository.git_dir()?.join(INSTALLED_PACKS))
 }
 
 /// Packs this repository has already indexed
 ///
 /// A missing or unreadable file simply means "none known", which costs one
 /// redundant fetch rather than failing an otherwise fine clone.
-pub fn load_installed() -> BTreeSet<String> {
-    let Ok(path) = installed_path() else {
+pub fn load_installed(repository: &Repository) -> BTreeSet<String> {
+    let Ok(path) = installed_path(repository) else {
         return BTreeSet::new();
     };
     let Ok(body) = std::fs::read_to_string(path) else {
@@ -42,8 +42,8 @@ pub fn load_installed() -> BTreeSet<String> {
     installed
 }
 
-pub fn save_installed(installed: &BTreeSet<String>) -> Result<()> {
-    let path = installed_path()?;
+pub fn save_installed(repository: &Repository, installed: &BTreeSet<String>) -> Result<()> {
+    let path = installed_path(repository)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("create the tape state directory")?;
     }
@@ -58,12 +58,12 @@ pub fn save_installed(installed: &BTreeSet<String>) -> Result<()> {
 }
 
 /// Handle git's `fetch` batch
-pub async fn fetch(store: &Store) -> Result<()> {
+pub async fn fetch(store: &Store, repository: &Repository) -> Result<()> {
     let Some((index, _)) = store.read_index().await? else {
         return Ok(());
     };
 
-    let mut installed = load_installed();
+    let mut installed = load_installed(repository);
     let mut fetched = 0u64;
 
     for entry in &index.packs {
@@ -75,7 +75,7 @@ pub async fn fetch(store: &Store) -> Result<()> {
         eprintln!("tape: fetching pack {} ({} bytes)", entry.track, entry.size);
         let pack = store.read_pack(entry).await?;
         if git::pack_object_count(&pack) > 0 {
-            git::index_pack(&pack)?;
+            repository.index_pack(&pack)?;
         }
 
         installed.insert(key);
@@ -83,7 +83,7 @@ pub async fn fetch(store: &Store) -> Result<()> {
     }
 
     if fetched > 0 {
-        save_installed(&installed)?;
+        save_installed(repository, &installed)?;
     }
 
     Ok(())

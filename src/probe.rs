@@ -64,26 +64,26 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_coherent_ref_advertisement() {
+    fn coherent_index() {
         let result = validate(index()).expect("valid").expect("cloneable");
         assert_eq!(result.head, "refs/heads/main");
         assert_eq!(result.refs.len(), 1);
     }
 
     #[test]
-    fn an_empty_index_is_not_cloneable() {
+    fn empty_index() {
         assert!(validate(Index::default()).expect("valid").is_none());
     }
 
     #[test]
-    fn rejects_a_dangling_head() {
+    fn dangling_head() {
         let mut index = index();
         index.head = Some("refs/heads/missing".into());
         assert!(validate(index).is_err());
     }
 
     #[test]
-    fn rejects_an_invalid_object_id() {
+    fn invalid_object_id() {
         let mut index = index();
         index.refs.insert("refs/heads/main".into(), "nope".into());
         assert!(validate(index).is_err());
