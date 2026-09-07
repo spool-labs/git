@@ -9,6 +9,7 @@ use tape_core::{prelude::StorageUnits, types::ContentType};
 use tape_protocol::api::CertifyRes;
 use tape_sdk::{
     keys::{helpers::load_ed25519_keypair, tape_key::TapeKey},
+    stream::manifest::MAX_TRACK_SIZE,
     track::write::WrittenTrack,
     Tapedrive,
 };
@@ -109,7 +110,7 @@ impl Publisher {
             let file = tokio::fs::File::open(&path).await?;
             let (written, receipts) = self
                 .client
-                .store_named_stream(
+                .store_named_object(
                     &key,
                     b"",
                     ContentType::Unknown,
@@ -122,7 +123,7 @@ impl Publisher {
                 track: written.track.track_number.0,
                 size,
                 digest: digest(&contents),
-                stream: true,
+                stream: size > MAX_TRACK_SIZE as u64,
             });
             pending.push(PendingTrack { written, receipts });
         }
