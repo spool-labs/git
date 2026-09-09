@@ -17,7 +17,7 @@ use tape_sdk::keys::helpers::load_ed25519_keypair;
 use tape_sdk::keys::tape_key::TapeKey;
 use tape_sdk::{Gateway, Tapedrive};
 
-use crate::index::{digest, Index, PackEntry, INDEX_NAME};
+use crate::index::{digest, Index, PackEntry, INDEX_CONTENT_TYPE, INDEX_NAME};
 
 const DEFAULT_RPC: &str = "https://api.devnet.solana.com";
 
@@ -26,9 +26,6 @@ const CASSETTE_DIR: &str = ".tape/cassettes";
 
 /// Where the solana CLI keeps its default keypair, relative to the home directory
 const SOLANA_KEYPAIR: &str = ".config/solana/id.json";
-
-/// Content type recorded on the ref index object
-const INDEX_CONTENT_TYPE: &str = "application/json";
 
 /// Backoff between read attempts
 ///

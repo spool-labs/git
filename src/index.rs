@@ -1,5 +1,10 @@
 //! The ref index: the one mutable thing in an otherwise append-only store
 //!
+//! This module is the crate's public description of what a repository looks
+//! like on a tape. Tooling that publishes a repository through the SDK
+//! directly, or lists a published repository's refs without invoking Git, uses
+//! these types so that it stays in agreement with the remote helper.
+//!
 //! Packs are content-addressed and immutable, so refs need somewhere to live
 //! that can change. That is a *named* object, and a named write appends a new
 //! version whose `hash(name)` key resolves to the newest one, which is exactly
@@ -23,6 +28,9 @@ use tape_crypto::hash::hash;
 /// Namespaced so it cannot collide with a bucket that also serves a website out
 /// of its named objects.
 pub const INDEX_NAME: &str = "git/refs.json";
+
+/// Content type recorded on the ref index object
+pub const INDEX_CONTENT_TYPE: &str = "application/json";
 
 /// Current index encoding version
 pub const INDEX_VERSION: u64 = 1;

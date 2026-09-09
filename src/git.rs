@@ -6,8 +6,7 @@
 //! signatures, and merge topology.
 
 use std::io::Write;
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::thread::JoinHandle;
 
@@ -19,6 +18,7 @@ const PACK_SIGNATURE: [u8; 4] = *b"PACK";
 const PACK_HEADER_BYTES: usize = 12;
 const PACK_COUNT_OFFSET: usize = 8;
 
+/// The local repository git invoked the helper for
 #[derive(Clone, Debug)]
 pub struct Repository {
     root: PathBuf,
@@ -33,17 +33,9 @@ impl Repository {
         Ok(Self::at(std::env::current_dir().context("current directory")?))
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     fn command(&self) -> Command {
         let mut command = Command::new("git");
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_TERMINAL_PROMPT", "0");
+        command.current_dir(&self.root);
         command
     }
 
@@ -97,60 +89,6 @@ impl Repository {
         self.capture(&["merge-base", "--is-ancestor", old, new])
             .map(|output| output.status.success())
             .unwrap_or(false)
-    }
-
-    /// Local branches and their tips. Remote-tracking refs stay implementation
-    /// details; a normal clone publishes its checked-out branch and full history.
-    pub fn branches(&self) -> Result<BTreeMap<String, String>> {
-        let lines = self.git(&[
-            "for-each-ref",
-            "--format=%(refname)%00%(objectname)",
-            "refs/heads",
-        ])?;
-        let mut refs = BTreeMap::new();
-        for line in lines.lines() {
-            let (name, object) = line
-                .split_once('\0')
-                .context("git returned an invalid branch record")?;
-            refs.insert(name.to_owned(), object.to_owned());
-        }
-        if refs.is_empty() {
-            bail!("repository has no branches to publish");
-        }
-        Ok(refs)
-    }
-
-    pub fn head_ref(&self) -> Result<String> {
-        self.git(&["symbolic-ref", "HEAD"])
-    }
-
-    /// Write bounded packfiles containing every object reachable from a ref.
-    pub fn pack_all(&self, directory: &Path) -> Result<Vec<PathBuf>> {
-        std::fs::create_dir_all(directory)
-            .with_context(|| format!("create pack directory {}", directory.display()))?;
-        let directory = std::fs::canonicalize(directory)
-            .with_context(|| format!("resolve pack directory {}", directory.display()))?;
-        let prefix = directory.join("pack");
-        let prefix = prefix
-            .to_str()
-            .context("pack directory is not valid UTF-8")?;
-        self.git(&[
-            "pack-objects",
-            "--all",
-            "--max-pack-size=48m",
-            prefix,
-        ])?;
-        let mut packs = std::fs::read_dir(&directory)
-            .with_context(|| format!("read pack directory {}", directory.display()))?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "pack"))
-            .collect::<Vec<_>>();
-        packs.sort();
-        if packs.is_empty() {
-            bail!("git did not produce a packfile");
-        }
-        Ok(packs)
     }
 
     /// Build a self-contained pack for the requested revisions.
@@ -289,41 +227,5 @@ mod tests {
         assert_eq!(pack_object_count(b"PAC"), 0);
         assert_eq!(pack_object_count(&[]), 0);
         assert_eq!(pack_object_count(b"NOPEnope\0\0\0\x05"), 0);
-    }
-
-    #[test]
-    fn pack_export() {
-        let current = std::env::current_dir().unwrap();
-        let temporary = tempfile::Builder::new()
-            .prefix("pack-export-")
-            .tempdir_in(&current)
-            .unwrap();
-        let root = temporary
-            .path()
-            .strip_prefix(&current)
-            .unwrap()
-            .join("repository");
-        assert!(!root.is_absolute());
-        std::fs::create_dir(&root).unwrap();
-        let repository = Repository::at(&root);
-        repository.git(&["init", "-b", "main"]).unwrap();
-        repository
-            .git(&["config", "user.name", "agent-1"])
-            .unwrap();
-        repository
-            .git(&["config", "user.email", "agent-1@ai.tape.network"])
-            .unwrap();
-        std::fs::write(root.join("index.html"), "hello").unwrap();
-        repository.git(&["add", "index.html"]).unwrap();
-        repository.git(&["commit", "-m", "add page"]).unwrap();
-
-        let packs = repository
-            .pack_all(&temporary.path().join("packs"))
-            .unwrap();
-
-        assert_eq!(repository.head_ref().unwrap(), "refs/heads/main");
-        assert!(repository.branches().unwrap().contains_key("refs/heads/main"));
-        assert_eq!(packs.len(), 1);
-        assert!(pack_object_count(&std::fs::read(&packs[0]).unwrap()) > 0);
     }
 }

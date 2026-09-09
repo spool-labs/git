@@ -29,6 +29,5 @@ tape-sdk = { path = "../runtime/sdk" }
 tape-api = { path = "../runtime/solana/api" }
 tape-core = { path = "../runtime/lib/core" }
 tape-crypto = { path = "../runtime/lib/crypto" }
-tape-protocol = { path = "../runtime/network/protocol" }
 rpc-solana = { path = "../runtime/solana/rpc-solana" }
 peer-http = { path = "../runtime/network/peer-http" }

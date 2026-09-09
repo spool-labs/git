@@ -1,383 +1,166 @@
-# tape-git-remote: verifiable decentralized git in one binary
+# git-remote-tape
 
-`git clone`, `git pull`, `git push` against a Tapedrive tape. No server, no
-hosting account. The binary is a standard git *remote helper*: drop
-`git-remote-tape` on your `PATH` and git learns the `tape://` transport, the
-same way it already knows `https://` and `ssh://`.
+[![Crates.io](https://img.shields.io/crates/v/tape-git-remote.svg)](https://crates.io/crates/tape-git-remote)
+[![Documentation](https://docs.rs/tape-git-remote/badge.svg)](https://docs.rs/tape-git-remote)
+[![License](https://img.shields.io/crates/l/tape-git-remote.svg)](LICENSE)
 
-```console
-$ git clone tape://7ebfEHSND45mPapMJ64MWVxgBafNoKwz4X2AdqqtiikL reed-solomon
-$ cd reed-solomon && git log --oneline -1
-d619d25 release 0.2.2
-```
-
-Every byte a clone receives is checked against an on-chain commitment before
-git ever sees it, so you do not have to trust whoever served it.
-
-> The bucket above is a **devnet** demo and its storage reservation expires. It is
-> what every number in this README was measured against, not a permanent home.
-> Reserve your own with `tape create`, below.
-
----
-
-## The one idea
-
-Git objects are content-addressed. An unnamed Tapedrive write is
-content-addressed too, because its track key *is* `hash(payload)`. So git's
-storage model and Tapedrive's turn out to be the same model, and a remote helper
-is mostly just plumbing between them.
-
-Two kinds of write do the whole job:
-
-| what | how it's stored | why |
-| --- | --- | --- |
-| repository objects | **unnamed** content-addressed track, one per pushed packfile | immutable, deduplicating, excluded from the bucket's object listing |
-| refs (branches, tags, HEAD) | **one named object**, rewritten each push | a named write appends a version, and `hash(name)` resolves to the newest, giving mutable-pointer semantics for free |
-
-That's it. `refs` points at object ids, the pack list points at track numbers, and
-everything else is git being git.
-
-## Install
+A Git remote helper for storing repositories on
+[Tapedrive](https://tape.network). Put `git-remote-tape` on your `PATH` and Git
+learns the `tape://` transport, alongside `https://` and `ssh://`.
 
 ```console
-cargo build --release
-cp target/release/git-remote-tape ~/.local/bin/     # anywhere on PATH
+$ git clone tape://<tape-address>
+$ git pull
+$ git push
 ```
 
-`Cargo.toml` depends on the Tapedrive crates by version, from crates.io. To build
-against a local checkout of the tape monorepo instead, copy the example config:
+Every byte received by Git is verified against an on-chain commitment, including
+bytes served through a gateway. Cloning needs no wallet, account, or permission;
+only the holder of the tape's key can push.
+
+> [!NOTE]
+> Tapedrive is in early access and invite-only.
+>
+> [Sign up](https://tape.network/#sign-up) for access, join the
+> [Discord](https://discord.gg/dVa9TWA45X) to follow development, or read the
+> [docs](https://docs.tape.network) for the full picture. Anyone can clone an
+> existing public repository; creating a tape and pushing to it requires access.
+
+## Why Git on Tapedrive?
+
+Tapedrive stores writes by content: a track's key is derived from its payload.
+Git works the same way, with content-addressed objects, so a Git remote
+mostly connects two compatible storage models.
+
+| Git data | Tapedrive storage | Role |
+|----------|-------------------|------|
+| Packfiles | Content-addressed writes | Immutable repository objects, deduplicated by content |
+| Branches, tags, and `HEAD` | One versioned write | The mutable view of the repository |
+
+The helper speaks Git's native `fetch` and `push` protocol. It moves packfiles
+and refs without re-synthesizing commits, so commit hashes, authorship, merge
+topology, tags, signatures, file modes, symlinks, and submodules are preserved.
+
+## Quickstart
+
+Install the remote helper from crates.io:
 
 ```console
-cp .cargo/config.toml.example .cargo/config.toml
+$ cargo install tape-git-remote
 ```
 
-That file's `[patch.crates-io]` block redirects the seven `tape-*` crates to
-relative paths. A patch resolves before the registry is consulted, so it works
-even for versions that are not published yet, and neither `Cargo.toml` nor
-anything in `src/` needs to change. `.cargo/config.toml` is gitignored, so local
-paths stay local.
+This installs the `git-remote-tape` binary. Git discovers it automatically when
+it encounters a `tape://` URL.
 
-## Use it
-
-Reserve a tape to push to. `tape create` files the keypair under
-`~/.tape/cassettes/<address>.json`, which is exactly where this helper looks for
-it, so push works with no further configuration.
+Install the [Tapedrive CLI](https://docs.tape.network/tools/cli), then reserve a
+tape for the repository:
 
 ```console
 $ tape -u d create --capacity 100m --epochs 250
-tape address:  7ebfEHSND45mPapMJ64MWVxgBafNoKwz4X2AdqqtiikL
+tape address: <tape-address>
+```
 
-$ cd my-repo
-$ git remote add tape tape://7ebfEHSND45mPapMJ64MWVxgBafNoKwz4X2AdqqtiikL
+The CLI saves the tape key under `~/.tape/cassettes/<tape-address>.json`, where
+the remote helper looks for it by default.
+
+Add the tape as a remote and push:
+
+```console
+$ cd my-repository
+$ git remote add tape tape://<tape-address>
 $ git push tape --all
 $ git push tape --tags
 ```
 
-From then on everything is ordinary git:
+Anyone with the address and the remote helper can now clone it:
 
 ```console
-$ git clone tape://7ebfEHSND45mPapMJ64MWVxgBafNoKwz4X2AdqqtiikL
-$ git pull tape main
-$ git push tape main
+$ git clone tape://<tape-address>
+$ git ls-remote tape://<tape-address>
 ```
 
-Anyone can clone with no keypair, no stake, and no account. Only the holder of
-the tape's keypair can push, so the tape's authority *is* the write ACL.
+From then on, branches and tags work through ordinary Git commands.
 
-### How other people get at it
+## Verification and access
 
-Cloning needs the binary and nothing else. No wallet, no account, no stake, no
-permission granted by anyone. Verified with a completely empty environment:
+The repository's ref index is verified against its on-chain commitment. Each
+packfile is then checked against the digest in that verified index before being
+passed to Git.
 
-```console
-$ env -i PATH=/usr/bin:/bin:$HOME/.local/bin HOME=/tmp/stranger \
-    git clone tape://7ebfEHSND45mPapMJ64MWVxgBafNoKwz4X2AdqqtiikL repo
-Cloning into 'repo'...
-tape: fetching pack 1 (219745 bytes)
-...
-```
+When `TAPE_GATEWAY_URL` is configured, the helper tries the gateway first for
+faster bulk reads. Gateway bytes receive the same verification. Invalid, stale,
+or unavailable data is discarded and fetched directly from storage nodes, so a
+gateway changes performance rather than the trust model.
 
-`git ls-remote tape://<bucket>` also works, if you just want to see the refs.
+Reads are public and require no keys. A push requires both a transaction fee
+payer and the key controlling the destination tape.
 
-Services that need the same readiness gate can use the library without parsing
-Git's line protocol:
+> [!WARNING]
+> Repositories are public and storage is append-only. Deleting a ref or
+> force-pushing does not remove previously stored objects. Never push a secret
+> that may need to be withdrawn later.
 
-```rust,ignore
-if let Some(repository) = tape_git_remote::probe_cloneable(tape_address).await? {
-    // HEAD and the advertised refs were read and verified from Tapedrive.
-    println!("{}", repository.head);
-}
-```
+## Configuration
 
-The function returns `None` until a coherent HEAD/ref index exists. This is the
-homepage demo's gate for revealing a `tape://` URL; publication success alone is
-not treated as proof that a fresh reader can resolve it.
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `TAPE_RPC_URL` | `https://api.devnet.solana.com` | Solana RPC endpoint |
+| `TAPE_GATEWAY_URL` | Direct storage-node reads | Optional gateway for bulk reads |
+| `TAPE_KEYPAIR` | `~/.config/solana/id.json`, when present | Transaction fee payer for pushes |
+| `TAPE_CASSETTE` | `~/.tape/cassettes/<tape-address>.json` | Key controlling the tape |
 
-Reading is open because the devnet nodes publish an `access_threshold` of zero.
-Writing is gated by custody of the tape keypair. So the asymmetry is simple:
-anyone reads, only the key holder writes.
+When the push credentials are absent, the helper remains read-only and cloning
+still works. An explicitly configured but invalid keypair path is treated as an
+error.
 
-**The part that still needs solving is shipping the binary.** This example builds
-against `tape-internal` by relative path, so nobody outside that checkout can
-compile it. Publishing `tape-sdk` to crates.io, retargeting onto the public
-`tape-client-core` crate, or just distributing prebuilt binaries would each fix
-it. As it stands, "install `git-remote-tape`" is not yet an instruction a
-stranger can follow.
+## Current limitations
 
-**Clone with no binary at all** is possible and worth building. Git still
-supports the dumb HTTP protocol, which is a purely static file layout:
+- Tapes reserve a fixed capacity for a fixed period. Use `tape resize` and
+  `tape extend` to manage the reservation.
+- Repositories are public. Private repositories would require client-side
+  encryption and are not currently supported.
+- The first clone fetches the complete history. Later fetches download only
+  packs the local repository has not already installed.
+- There is no remote garbage collection. Packs accumulate as the repository is
+  pushed.
+- Concurrent pushes are resolved optimistically. The helper retries a raced
+  update, but sustained contention can require the user to retry the push.
+- This is a Git transport, not a forge: it does not provide a code browser,
+  issues, pull requests, or collaboration workflows.
 
-```
-HEAD                          ref: refs/heads/main
-info/refs                     <sha>\t<refname> per line
-objects/info/packs            P pack-<sha>.pack
-objects/pack/pack-<sha>.pack
-objects/pack/pack-<sha>.idx
-```
+## Library use
 
-Write those as **named** objects on push and the gateway's existing site serving
-makes `git clone https://<repo>.git.miester.id/` work with unmodified git. If the
-packs themselves were named with their dumb-HTTP paths, both access paths could
-share one stored copy rather than duplicating it. Two honest caveats. Git probes
-`info/refs?service=git-upload-pack` first and only falls back to dumb HTTP if
-that probe fails, so this depends on how the gateway treats query strings. And
-gateway bytes reaching stock git are **unverified**, because stock git has no way
-to check an on-chain commitment, so that path trades integrity for reach.
-`tape://` stays the trustless one.
-
-### Configuration
-
-| variable | default | meaning |
-| --- | --- | --- |
-| `TAPE_RPC_URL` | `https://api.devnet.solana.com` | Solana endpoint |
-| `TAPE_GATEWAY_URL` | unset, so reads go direct to storage nodes | gateway for bulk reads, and worth **setting** |
-| `TAPE_KEYPAIR` | `~/.config/solana/id.json` if it exists | payer for transaction fees, **push only** |
-| `TAPE_CASSETTE` | `~/.tape/cassettes/<bucket>.json` | the tape's key, **push only** |
-
-The keypairs are optional. When neither is found the remote is simply read-only,
-which is what makes a bare `git clone` work on a machine that has never seen
-Solana. Set `TAPE_KEYPAIR` explicitly and a bad path becomes an error rather than
-a silent downgrade.
-
-### Use a gateway
-
-A gateway is worth setting up, or pointing at your own:
-
-```console
-$ export TAPE_GATEWAY_URL=https://gw.example.id
-$ git clone tape://<bucket>
-```
-
-Same repository, same machine, cold clone both times:
-
-| reads via | wall clock |
-| --- | --- |
-| storage nodes direct | 17.4 s |
-| gateway | **3.1 s** |
-
-It is also the only path that works from a network that only lets 443 out, since
-direct reads talk to storage nodes on their own advertised ports.
-
-**This costs nothing in trust.** Gateway bytes arrive unproven, so the helper
-proves them itself before git ever sees them:
-
-- the **ref index** is checked against its on-chain commitment via
-  `Tapedrive::verify`, which is the root of trust for everything else
-- each **pack** is checked against the digest recorded in that now-proven index
-
-Bytes failing either check are thrown away and refetched from storage nodes, so a
-gateway that is broken, stale, or actively lying costs you latency and nothing
-else. Public gateways are rate limited. A `429` is honoured up to ten seconds a
-few times over, and after that the helper stops leaning on someone else's
-capacity and goes direct.
-
-## Does it really handle branches, commits, checkouts?
-
-Yes, and not by handling them case by case but by never looking at them.
-
-This helper implements git's `fetch`/`push` dialect, which moves two things:
-opaque packfile bytes and a ref map. Branches *are* the ref map. Commit
-messages, authors, dates, merge topology, file modes, symlinks, submodule
-gitlinks, annotated tags and GPG signatures all already live inside the objects
-git hands us, so they survive byte-identically and SHA-1s do not change.
-`git commit` and `git checkout` never contact a remote at all, being local
-operations on objects already in `.git`.
-
-Measured against a real repository (`tape-reed-solomon`, 3 branches, 30 commits,
-339 objects) pushed to devnet and cloned back:
-
-| check | source | clone |
-| --- | --- | --- |
-| object graph digest | `4cfa4051...` | `4cfa4051...` |
-| raw bytes of all 30 commit objects | `470cd094...` | `470cd094...` |
-| `v0.2.2^{tree}` | `656e301e` | `656e301e` |
-
-This is also why the helper does **not** use git's `import`/`export`
-(fast-import/fast-export) capabilities, which would be less code. Those
-re-synthesize commits rather than carrying them, and do not reliably preserve
-exact object bytes. "Verifiable" has to mean the hashes match.
-
-## Why one pack per push, not one write per object
-
-The obvious mapping, one Tapedrive write per git object, is the wrong one. For
-the repository above:
-
-- 339 objects, 1.93 MB of raw object content
-- 172 of them exceed the 825-byte inline limit, so each would take the slow
-  path: erasure-code, register, upload slices, collect signatures, certify
-- the same history as a single packfile is **219,745 bytes**
-
-Git's delta compression does 9x better than per-object storage and you get it
-for free from `git pack-objects`. One track holds up to 64 MiB, so the entire
-history fits in one write instead of 339.
-
-End-to-end on devnet, measured through git itself:
-
-```
-git push tape --all      278 objects   219,745 B   7.3 s
-git clone tape://...     full history              4.6 s
-git commit + git push      3 objects     4,499 B   9.3 s
-git pull tape v0.2.2     fast-forward              7.0 s
-```
-
-An incremental push carries only the new objects, not the history. Latency has a
-floor of a few seconds per operation, dominated by RPC bootstrap and peer
-discovery rather than the transfer.
-
-Underneath, a read pulls only *k* slices rather than the whole stored footprint,
-302,736 B across 7 of 20 for that first pack. Erasure coding also means writes
-tolerate stragglers. Five of twenty slice uploads failed during one of these
-pushes and it still succeeded on quorum, with the rest handed to the recovery
-worker.
-
-After the runs above the bucket holds 7 tracks and 449,859 of its 104,857,600
-bytes, and its object listing contains exactly one entry:
-
-```console
-$ tape object ls --bucket 7ebfEHSND45mPapMJ64MWVxgBafNoKwz4X2AdqqtiikL
-TYPE            SIZE  CONTENT-TYPE      NAME
-object           563  application/json  git/refs.json
-```
-
-The six packs are unnamed, so they never show up as objects. That is what lets a
-git remote and a served website share one bucket.
-
-## Why reads are trustless
-
-The helper reads through the SDK's direct peer path, which fetches the track's
-on-chain record and checks the bytes against its commitment, using `hash(bytes)`
-for inline tracks and the Merkle commitment for erasure-coded ones. A mismatch
-fails with `CommitmentMismatch` rather than handing git bad data. Peer TLS is
-pinned to each node's on-chain key, so a fake peer cannot get in the way either.
-On top of that, the ref index records each pack's digest and the helper re-checks
-it.
-
-When a gateway is configured its bytes go through the same standard before
-reaching git, either proven against the on-chain commitment or discarded and
-refetched from storage nodes. See [Use a gateway](#use-a-gateway). The guarantee
-is identical either way and only the latency differs.
-
-## Known limits
-
-Worth reading before trusting this with anything that matters.
-
-- **Storage is prepaid and expires.** A tape is reserved for a capacity and a
-  number of epochs, costing `954 flux x MB x epochs` on devnet at roughly an hour
-  per epoch, up to 256 epochs ahead. Past expiry the reservation lapses, so reach
-  for `tape extend` and `tape resize`. This is the sharpest difference from a
-  hosted forge.
-- **Concurrent pushes are handled, but optimistically.** Tapedrive has no
-  compare-and-swap. It resolves a name to its newest version and cannot reject a
-  write based on the previous one, so a naive read-modify-write silently loses a
-  simultaneous pusher's refs. Instead the helper writes, then checks the version
-  list to see whether anything landed between the version it merged against and
-  its own. If something did, it re-merges against the version it shadowed and
-  writes again, up to five attempts. Re-deciding every refspec against the newer
-  base *is* the merge, because the fast-forward checks re-run against reality, so
-  a genuine divergence surfaces as `non-fast-forward` on that ref rather than
-  quietly clobbering. Because storage is append-only, a lost race destroys
-  nothing. Every index version and every pack stays readable, and a retry
-  converges. What this is *not* is a lock. A push that keeps losing eventually
-  gives up and asks you to retry.
-- **Nothing can be un-pushed.** Storage is append-only. Force-pushing rewrites
-  refs but never removes objects, so history cannot be lost, and an accidentally
-  committed secret cannot be withdrawn.
-- **Every repository is public.** The write side is already access-controlled,
-  since only the tape's keypair can push, but reads are open to anyone holding the
-  bucket address, permanently. A private repository here has to mean *encrypted*
-  rather than *access-listed*. See below.
-- **A freshly written track is not instantly readable.** It can be certified
-  on-chain before enough peers will serve its slices, so reads retry with backoff
-  over about twelve seconds. This matters most for the index once it outgrows the
-  825-byte inline limit and becomes erasure-coded, which is why the encoding is
-  kept as small as it is.
-- **No remote `gc`.** Packs accumulate, one per push. A repack path that writes
-  one consolidated pack and truncates the list is not implemented yet.
-- **Fetch is whole-history.** The helper installs every pack the remote has that
-  the local repo lacks, rather than resolving the specific object ids git asked
-  for. Packs already installed are recorded in `.git/tape/installed-packs`, so
-  `git pull` is incremental, but the first clone always reads everything.
-- **`git fsck` reports dangling objects for refs you did not fetch.** Packs are
-  the unit of transfer, so a fetch installs whole packs, including objects
-  belonging to ref namespaces your refspec skipped. Harmless, and those objects
-  become reachable the moment you fetch the refs.
-- **A pushed repo is not a browsable website.** Tapedrive's gateway can serve a
-  tape as a static site, but that reads the *named* object index and packs are
-  unnamed. The two namespaces cannot collide, so publishing an HTML view alongside
-  the git data into the same bucket would work. It just isn't implemented.
-
-## Private repositories (not implemented)
-
-Access control cannot work here, so this has to be encryption. The bucket address
-is public, the data is permanent, and nothing can be withdrawn, so an ACL you
-could add today would be a promise the storage layer is unable to keep.
-
-The shape that does work is `git-remote-gcrypt`'s: encrypt each pack before it is
-written, and encrypt the ref index too. The index matters as much as the packs,
-because plaintext refs leak branch names, the commit graph's shape, and who is
-working on what. What stays visible regardless is on-chain metadata: that the
-bucket exists, how large each write was, and when each push happened. Push
-cadence and rough diff sizes are not hideable.
-
-Two consequences worth deciding on before building it:
-
-- **Content addressing and encryption pull against each other.** Encrypt
-  deterministically and identical packs dedupe, but equality leaks. Use a fresh
-  nonce per write and dedup goes away. For git the nonce is the right call, since
-  packs are already unique per push.
-- **Revocation is impossible.** Append-only storage means a former collaborator
-  keeps every pack they could already decrypt, forever. Rotating the key protects
-  future pushes and nothing else. That is a property of the medium rather than a
-  gap in the implementation, and it should be stated plainly to anyone who asks
-  for "private repos".
-
-Integrity survives fine. The on-chain commitment covers the ciphertext and an
-AEAD tag authenticates the plaintext, so the verified-read story gets slightly
-stronger rather than weaker. I would reach for `age` (the `rage` crate) with
-per-collaborator recipient keys rather than hand-rolling any of it.
-
-## Layout
-
-```
-src/main.rs    the stdin/stdout protocol loop: capabilities / list / fetch / push / option
-src/push.rs    refspec decisions, the concurrency merge, publishing the index
-src/fetch.rs   installing packs, and remembering which ones are already here
-src/store.rs   Tapedrive I/O: gateway-then-direct proven reads, certified writes
-src/index.rs   the ref index object, kept small enough to stay inline
-src/git.rs     subprocess plumbing to pack-objects and index-pack
-```
+The crate's `index` module describes how a repository is laid out on a tape:
+the name and content type of the ref index, its JSON encoding, and the digest
+recorded for each pack. Tooling that publishes a repository through the SDK
+directly, or lists a published repository's refs without invoking Git, should
+build on those types so it stays in agreement with the helper. See the
+[API reference](https://docs.rs/tape-git-remote) for details.
 
 ## Development
 
 ```console
-$ cargo test           # 18 unit tests, no network required
-$ cargo clippy --all-targets
+$ make check
 ```
 
-The tests cover the parts worth testing without a chain: refspec parsing,
-fast-forward and superseded-ref decisions, HEAD stickiness, pack-header parsing,
-digest matching, index round-tripping, and a guard that a realistic index still
-fits inside the 825-byte inline write limit.
+To develop against a sibling checkout of the Tapedrive monorepo, copy the local
+Cargo patch configuration:
 
-Formatting follows the parent project. `rustfmt.toml` sets
-`disable_all_formatting`, so layout is by hand and deliberate.
+```console
+$ cp .cargo/config.toml.example .cargo/config.toml
+```
+
+The copied file is ignored by Git and does not change the published dependency
+configuration.
+
+## Learn more
+
+- [Tapedrive documentation](https://docs.tape.network)
+- [Tapedrive CLI](https://docs.tape.network/tools/cli)
+- [Tapedrive SDK quickstart](https://docs.tape.network/sdks/quickstart)
+- [Discord](https://discord.gg/dVa9TWA45X)
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for
+details.
