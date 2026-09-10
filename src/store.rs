@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Error, Result};
 
 use peer_http::HttpApi;
 use rpc_solana::{RpcConfig, SolanaRpc};
@@ -52,6 +52,12 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
 
 /// Track-listing page size when enumerating index versions
 const TRACK_PAGE_SIZE: u32 = 1_000;
+
+/// Backoff while a written index version reaches the node that answers a listing
+///
+/// The last entry is never slept on, so this is eight listings over about sixteen
+/// seconds.
+const INDEX_LISTING_BACKOFF_MS: [u64; 8] = [100, 250, 500, 1_000, 2_000, 4_000, 8_000, 0];
 
 pub struct Store {
     /// Direct peer client
@@ -369,6 +375,31 @@ impl Store {
         }
     }
 
+    /// Every version of the ref index, once the listing includes `track`
+    ///
+    /// A listing is answered by whichever storage node replies first, and one that
+    /// has not ingested our newest write yet replies without it. Listings are
+    /// prefix consistent, so a listing that reaches `track` is current for
+    /// everything below it too.
+    pub async fn index_versions_including(&self, track: TrackNumber) -> Result<Vec<TrackNumber>> {
+        for (attempt, backoff) in INDEX_LISTING_BACKOFF_MS.iter().enumerate() {
+            let versions = self.index_versions().await?;
+            if versions.contains(&track) {
+                return Ok(versions);
+            }
+
+            if attempt + 1 < INDEX_LISTING_BACKOFF_MS.len() {
+                eprintln!(
+                    "tape: index version at track {} is not listed yet; retrying in {backoff}ms",
+                    track.0
+                );
+                tokio::time::sleep(Duration::from_millis(*backoff)).await;
+            }
+        }
+
+        Err(not_listed(track))
+    }
+
     async fn index_versions_once(&self) -> Result<Vec<TrackNumber>, TapedriveError> {
         let key = hash(INDEX_NAME.as_bytes());
         let mut versions = Vec::new();
@@ -485,6 +516,17 @@ impl Store {
 
         Ok(track.track_number)
     }
+}
+
+/// Error for an index version that is confirmed on chain but absent from every listing
+pub fn not_listed(track: TrackNumber) -> Error {
+    anyhow!(
+        "ref index version at track {} is written and confirmed on chain, but no \
+         storage node lists it yet. Nothing was lost, every object and every index \
+         version is still stored, and the push will go through if you retry it in a \
+         moment",
+        track.0
+    )
 }
 
 fn is_account_propagation_error(error: &TapedriveError) -> bool {
