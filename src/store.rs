@@ -29,9 +29,9 @@ const SOLANA_KEYPAIR: &str = ".config/solana/id.json";
 
 /// Backoff between read attempts
 ///
-/// The last entry is never slept on, so this is six tries over about twelve
+/// The last entry is never slept on, so this is nine tries over about forty-two
 /// seconds.
-const READ_BACKOFF_MS: [u64; 6] = [400, 800, 1_600, 3_200, 6_000, 0];
+const READ_BACKOFF_MS: [u64; 9] = [400, 800, 1_600, 3_200, 6_000, 8_000, 10_000, 12_000, 0];
 
 /// Backoff while a freshly created tape propagates to the RPC reader used by
 /// this process.
@@ -53,7 +53,7 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
 /// Track-listing page size when enumerating index versions
 const TRACK_PAGE_SIZE: u32 = 1_000;
 
-/// Backoff between listings while a written index version reaches the answering node, last entry never slept on
+/// Backoff between listings while one catches up with the chain, last entry never slept on
 const INDEX_LISTING_BACKOFF_MS: [u64; 8] = [100, 250, 500, 1_000, 2_000, 4_000, 8_000, 0];
 
 pub struct Store {
@@ -328,7 +328,12 @@ impl Store {
         // making repository discovery depend on one assigned storage peer being
         // reachable, while the index bytes themselves still go through the
         // gateway-and-proof path below.
-        let Some(track) = self.index_versions().await?.last().copied() else {
+        // Readers prefer a listing that reached the chain but never fail on node lag
+        let versions = match self.index_versions_complete(TrackNumber(0)).await {
+            Ok(versions) => versions,
+            Err(_) => self.index_versions().await?,
+        };
+        let Some(track) = versions.last().copied() else {
             return Ok(None);
         };
         let index = self.read_index_at(track).await?;
@@ -348,10 +353,17 @@ impl Store {
     /// what lets a pusher notice it raced with someone: there is no
     /// compare-and-swap to lean on, but nothing is ever actually lost either.
     pub async fn index_versions(&self) -> Result<Vec<TrackNumber>> {
+        let (versions, _) = self.index_versions_seen().await?;
+
+        Ok(versions)
+    }
+
+    /// Every version of the ref index, with the highest track number the listing reached
+    async fn index_versions_seen(&self) -> Result<(Vec<TrackNumber>, TrackNumber)> {
         let mut last_error = None;
         for (attempt, backoff) in ACCOUNT_PROPAGATION_BACKOFF_MS.iter().enumerate() {
             match self.index_versions_once().await {
-                Ok(versions) => return Ok(versions),
+                Ok(seen) => return Ok(seen),
                 Err(error)
                     if is_account_propagation_error(&error)
                         && attempt + 1 < ACCOUNT_PROPAGATION_BACKOFF_MS.len() =>
@@ -372,29 +384,47 @@ impl Store {
         }
     }
 
-    /// Every version of the ref index, from a listing that already includes `track`
-    pub async fn index_versions_including(&self, track: TrackNumber) -> Result<Vec<TrackNumber>> {
+    /// Every version of the ref index, from a listing that reaches the chain and `at_least`
+    pub async fn index_versions_complete(&self, at_least: TrackNumber) -> Result<Vec<TrackNumber>> {
+        let target = self.listing_target(at_least).await;
+
         for (attempt, backoff) in INDEX_LISTING_BACKOFF_MS.iter().enumerate() {
-            let versions = self.index_versions().await?;
-            if versions.contains(&track) {
+            let (versions, highest) = self.index_versions_seen().await?;
+            if highest.0 >= target.0 {
                 return Ok(versions);
             }
 
             if attempt + 1 < INDEX_LISTING_BACKOFF_MS.len() {
                 eprintln!(
-                    "tape: index version at track {} is not listed yet; retrying in {backoff}ms",
-                    track.0
+                    "tape: listing has reached track {} of {}; retrying in {backoff}ms",
+                    highest.0, target.0
                 );
                 tokio::time::sleep(Duration::from_millis(*backoff)).await;
             }
         }
 
-        Err(not_listed(track))
+        Err(not_listed(target))
     }
 
-    async fn index_versions_once(&self) -> Result<Vec<TrackNumber>, TapedriveError> {
+    /// The track number a listing has to reach before a merge can trust it
+    async fn listing_target(&self, at_least: TrackNumber) -> TrackNumber {
+        match self.sdk.get_tape(&self.bucket).await {
+            Ok(tape) => {
+                let newest = tape.tracks.next_number().0.saturating_sub(1);
+                TrackNumber(newest.max(at_least.0))
+            }
+            // A worse floor than the chain, still better than the first answer we get
+            Err(error) => {
+                eprintln!("tape: could not read the tape account ({error})");
+                at_least
+            }
+        }
+    }
+
+    async fn index_versions_once(&self) -> Result<(Vec<TrackNumber>, TrackNumber), TapedriveError> {
         let key = hash(INDEX_NAME.as_bytes());
         let mut versions = Vec::new();
+        let mut highest = TrackNumber(0);
         let mut cursor = None;
 
         loop {
@@ -404,6 +434,9 @@ impl Store {
                 .await?;
 
             for track in &tracks {
+                if track.track_number.0 > highest.0 {
+                    highest = track.track_number;
+                }
                 if track.key == key {
                     versions.push(track.track_number);
                 }
@@ -417,7 +450,7 @@ impl Store {
 
         versions.sort_by_key(|track| track.0);
 
-        Ok(versions)
+        Ok((versions, highest))
     }
 
     /// Fetch a pack recorded in the index, checking it against that record
@@ -510,11 +543,11 @@ impl Store {
     }
 }
 
-/// Error for an index version that is confirmed on chain but absent from every listing
+/// Error for a listing that has not caught up with the chain
 pub fn not_listed(track: TrackNumber) -> Error {
     anyhow!(
-        "ref index version at track {} is written and confirmed on chain, but no \
-         storage node lists it yet. Nothing was lost, every object and every index \
+        "no storage node has listed this tape up to track {} yet, so the ref index \
+         cannot be merged safely. Nothing was lost, every object and every index \
          version is still stored, and the push will go through if you retry it in a \
          moment",
         track.0
