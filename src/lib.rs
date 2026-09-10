@@ -11,3 +11,10 @@ mod store;
 
 pub mod index;
 pub mod remote_helper;
+/// Crate version plus the source revision stamped by `build.rs`.
+pub const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "+",
+    env!("TAPE_BUILD_SHA"),
+    env!("TAPE_BUILD_SUFFIX"),
+);
