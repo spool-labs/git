@@ -143,16 +143,6 @@ build on those types so it stays in agreement with the helper. See the
 $ make check
 ```
 
-To develop against a sibling checkout of the Tapedrive monorepo, copy the local
-Cargo patch configuration:
-
-```console
-$ cp .cargo/config.toml.example .cargo/config.toml
-```
-
-The copied file is ignored by Git and does not change the published dependency
-configuration.
-
 ## Learn more
 
 - [Tapedrive documentation](https://docs.tape.network)

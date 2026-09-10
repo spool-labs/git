@@ -1,9 +1,4 @@
 target/
 
-# Local build redirect. Copy .cargo/config.toml.example to create it. It holds
-# machine-specific relative paths, and committing it would silently override the
-# crates.io versions for everyone else.
-.cargo/config.toml
-
 # Cargo.lock is committed: this crate is a binary, so a pinned dependency graph
 # is what makes someone else's build reproduce ours.
