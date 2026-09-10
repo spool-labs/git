@@ -53,10 +53,7 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
 /// Track-listing page size when enumerating index versions
 const TRACK_PAGE_SIZE: u32 = 1_000;
 
-/// Backoff while a written index version reaches the node that answers a listing
-///
-/// The last entry is never slept on, so this is eight listings over about sixteen
-/// seconds.
+/// Backoff between listings while a written index version reaches the answering node, last entry never slept on
 const INDEX_LISTING_BACKOFF_MS: [u64; 8] = [100, 250, 500, 1_000, 2_000, 4_000, 8_000, 0];
 
 pub struct Store {
@@ -375,12 +372,7 @@ impl Store {
         }
     }
 
-    /// Every version of the ref index, once the listing includes `track`
-    ///
-    /// A listing is answered by whichever storage node replies first, and one that
-    /// has not ingested our newest write yet replies without it. Listings are
-    /// prefix consistent, so a listing that reaches `track` is current for
-    /// everything below it too.
+    /// Every version of the ref index, from a listing that already includes `track`
     pub async fn index_versions_including(&self, track: TrackNumber) -> Result<Vec<TrackNumber>> {
         for (attempt, backoff) in INDEX_LISTING_BACKOFF_MS.iter().enumerate() {
             let versions = self.index_versions().await?;
