@@ -328,7 +328,12 @@ impl Store {
         // making repository discovery depend on one assigned storage peer being
         // reachable, while the index bytes themselves still go through the
         // gateway-and-proof path below.
-        let Some(track) = self.index_versions().await?.last().copied() else {
+        // Readers prefer a listing that reached the chain but never fail on node lag
+        let versions = match self.index_versions_complete(TrackNumber(0)).await {
+            Ok(versions) => versions,
+            Err(_) => self.index_versions().await?,
+        };
+        let Some(track) = versions.last().copied() else {
             return Ok(None);
         };
         let index = self.read_index_at(track).await?;
