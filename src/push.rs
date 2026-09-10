@@ -9,7 +9,7 @@
 
 use std::io::Write;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use tape_core::types::TrackNumber;
 
@@ -364,16 +364,16 @@ async fn publish(
     let mut results = Vec::new();
 
     for attempt in 1..=PUSH_ATTEMPTS {
-        // Re-basing on a listing that stops below our last write would repeat the same merge
-        let versions = match ours.last() {
-            Some(track) => store.index_versions_including(*track).await?,
-            None => store.index_versions().await?,
-        };
+        // Merging on a listing that lags the chain drops refs another pusher landed
+        let at_least = ours.last().copied().unwrap_or(TrackNumber(0));
+        let versions = store.index_versions_complete(at_least).await?;
         let head_version = versions.last().copied();
         let base_version = newest_foreign(&versions, &ours, None);
 
         let mut index = match base_version {
-            Some(track) => store.read_index_at(track).await?,
+            Some(track) => store.read_index_at(track).await.with_context(|| {
+                format!("index version at track {} is not readable yet; nothing was lost, retry the push in a moment", track.0)
+            })?,
             None => Index::default(),
         };
 
@@ -385,7 +385,9 @@ async fn publish(
 
         let visible = match head_version {
             Some(track) if Some(track) == base_version => index.clone(),
-            Some(track) => store.read_index_at(track).await?,
+            Some(track) => store.read_index_at(track).await.with_context(|| {
+                format!("index version at track {} is not readable yet; nothing was lost, retry the push in a moment", track.0)
+            })?,
             None => Index::default(),
         };
         if is_satisfied(&visible, &decision, pack)
@@ -408,7 +410,7 @@ async fn publish(
         // what we need without touching content. We won without a race when nothing
         // landed after us and the version directly below ours is exactly the base we
         // merged against.
-        let after = store.index_versions_including(written).await?;
+        let after = store.index_versions_complete(written).await?;
         match landing(base_version, written, &ours, &after) {
             Landing::Clean => break,
             Landing::NotVisible => return Err(not_listed(written)),
@@ -461,6 +463,9 @@ pub async fn push(
 mod tests {
     use super::*;
 
+    /// Listings one scripted attempt serves before it gives up on the chain
+    const LISTING_TRIES: usize = 8;
+
     fn index_with(name: &str, object_id: &str) -> Index {
         let mut index = Index::default();
         index.refs.insert(name.to_string(), object_id.to_string());
@@ -487,8 +492,23 @@ mod tests {
         }
     }
 
-    fn serve(script: &[&[u64]], served: &mut usize) -> Vec<TrackNumber> {
-        let listing = script[(*served).min(script.len() - 1)];
+    #[derive(Default)]
+    struct Scenario {
+        /// Listings served in order, the last one repeating once they run out
+        listings: Vec<Vec<u64>>,
+
+        /// Track count the chain reports, one per attempt, the last one repeating
+        chain: Vec<u64>,
+
+        /// Track numbers each write comes back with, in order
+        writes: Vec<u64>,
+
+        /// Versions somebody else wrote whose index already satisfies the decision
+        satisfying: Vec<u64>,
+    }
+
+    fn serve(scenario: &Scenario, served: &mut usize) -> Vec<TrackNumber> {
+        let listing = &scenario.listings[(*served).min(scenario.listings.len() - 1)];
         *served += 1;
 
         let mut versions = Vec::new();
@@ -497,6 +517,29 @@ mod tests {
         }
 
         versions
+    }
+
+    // Stands in for index_versions_complete: re-list until one reaches the chain
+    fn complete(
+        scenario: &Scenario,
+        served: &mut usize,
+        chain: u64,
+        at_least: u64,
+    ) -> Result<Vec<TrackNumber>> {
+        let target = chain.saturating_sub(1).max(at_least);
+
+        for _ in 0..LISTING_TRIES {
+            let versions = serve(scenario, served);
+            let highest = match versions.last() {
+                Some(track) => track.0,
+                None => 0,
+            };
+            if highest >= target {
+                return Ok(versions);
+            }
+        }
+
+        Err(not_listed(TrackNumber(target)))
     }
 
     // Stands in for reading the head index back and checking it against the decision
@@ -527,31 +570,31 @@ mod tests {
     }
 
     // The publish loop over scripted listings, one served per call, with no store
-    fn drive(script: &[&[u64]], writes: &[u64], satisfying: &[u64], run: &mut Run) -> Result<()> {
+    fn drive(scenario: &Scenario, run: &mut Run) -> Result<()> {
         let mut served = 0;
 
         for attempt in 1..=PUSH_ATTEMPTS {
-            let versions = serve(script, &mut served);
-            if let Some(track) = run.ours.last() {
-                if !versions.contains(track) {
-                    return Err(not_listed(*track));
-                }
-            }
+            let chain = scenario.chain[((attempt - 1) as usize).min(scenario.chain.len() - 1)];
+            let at_least = match run.ours.last() {
+                Some(track) => track.0,
+                None => 0,
+            };
+            let versions = complete(scenario, &mut served, chain, at_least)?;
 
             let base = newest_foreign(&versions, &run.ours, None);
             run.bases.push(base);
 
             let head = versions.last().copied();
-            if is_accepting(run, head, satisfying, base) {
+            if is_accepting(run, head, &scenario.satisfying, base) {
                 return Ok(());
             }
 
-            let written = TrackNumber(writes[run.writes]);
+            let written = TrackNumber(scenario.writes[run.writes]);
             run.writes += 1;
             run.ours.push(written);
             run.parents.push(base.map(|track| track.0));
 
-            let after = serve(script, &mut served);
+            let after = complete(scenario, &mut served, chain, written.0)?;
             match landing(base, written, &run.ours, &after) {
                 Landing::Clean => return Ok(()),
                 Landing::NotVisible => return Err(not_listed(written)),
@@ -654,20 +697,48 @@ mod tests {
     #[test]
     fn clean_write() {
         let mut run = Run::default();
+        let scenario = Scenario {
+            listings: vec![vec![4], vec![4, 7]],
+            chain: vec![5],
+            writes: vec![7],
+            ..Scenario::default()
+        };
 
-        drive(&[&[4], &[4, 7]], &[7], &[], &mut run).expect("push should settle");
+        drive(&scenario, &mut run).expect("push should settle");
 
         assert_eq!(run.writes, 1);
         assert_eq!(run.bases, vec![Some(TrackNumber(4))]);
+    }
+
+    // a listing behind the track count the chain reports is re-listed, never merged on
+    #[test]
+    fn base_waits_for_chain() {
+        let mut run = Run::default();
+        let scenario = Scenario {
+            listings: vec![vec![4], vec![4, 7], vec![4, 7, 9]],
+            chain: vec![8],
+            writes: vec![9],
+            ..Scenario::default()
+        };
+
+        drive(&scenario, &mut run).expect("push should settle");
+
+        assert_eq!(run.writes, 1);
+        assert_eq!(run.bases, vec![Some(TrackNumber(7))]);
     }
 
     // a version between our base and our write re-bases the next attempt on it
     #[test]
     fn merge_between() {
         let mut run = Run::default();
-        let script: [&[u64]; 4] = [&[4], &[4, 5, 7], &[4, 5, 7], &[4, 5, 7, 9]];
+        let scenario = Scenario {
+            listings: vec![vec![4], vec![4, 5, 7], vec![4, 5, 7], vec![4, 5, 7, 9]],
+            chain: vec![5],
+            writes: vec![7, 9],
+            ..Scenario::default()
+        };
 
-        drive(&script, &[7, 9], &[], &mut run).expect("push should settle");
+        drive(&scenario, &mut run).expect("push should settle");
 
         assert_eq!(run.writes, 2);
         assert_eq!(run.bases, vec![Some(TrackNumber(4)), Some(TrackNumber(5))]);
@@ -688,8 +759,14 @@ mod tests {
     #[test]
     fn own_head_stale() {
         let mut run = seeded(7, 4);
+        let scenario = Scenario {
+            listings: vec![vec![4, 5, 7], vec![4, 5, 7, 9]],
+            chain: vec![8],
+            writes: vec![9],
+            ..Scenario::default()
+        };
 
-        drive(&[&[4, 5, 7], &[4, 5, 7, 9]], &[9], &[], &mut run).expect("push should settle");
+        drive(&scenario, &mut run).expect("push should settle");
 
         assert_eq!(run.writes, 1);
         assert_eq!(run.bases, vec![Some(TrackNumber(5))]);
@@ -699,8 +776,13 @@ mod tests {
     #[test]
     fn own_head_current() {
         let mut run = seeded(7, 4);
+        let scenario = Scenario {
+            listings: vec![vec![4, 7]],
+            chain: vec![8],
+            ..Scenario::default()
+        };
 
-        drive(&[&[4, 7]], &[], &[], &mut run).expect("push should settle");
+        drive(&scenario, &mut run).expect("push should settle");
 
         assert_eq!(run.writes, 0);
         assert_eq!(run.bases, vec![Some(TrackNumber(4))]);
@@ -710,8 +792,14 @@ mod tests {
     #[test]
     fn accepts_newer() {
         let mut run = Run::default();
+        let scenario = Scenario {
+            listings: vec![vec![4], vec![4, 7, 9]],
+            chain: vec![5, 10],
+            writes: vec![7],
+            satisfying: vec![9],
+        };
 
-        drive(&[&[4], &[4, 7, 9]], &[7], &[9], &mut run).expect("push should settle");
+        drive(&scenario, &mut run).expect("push should settle");
 
         assert_eq!(run.writes, 1);
         assert_eq!(run.bases[1], Some(TrackNumber(9)));
@@ -721,11 +809,17 @@ mod tests {
     #[test]
     fn never_listed() {
         let mut run = Run::default();
+        let scenario = Scenario {
+            listings: vec![vec![4]],
+            chain: vec![5],
+            writes: vec![7],
+            ..Scenario::default()
+        };
 
-        let error = drive(&[&[4], &[4]], &[7], &[], &mut run).expect_err("push should stop");
+        let error = drive(&scenario, &mut run).expect_err("push should stop");
 
         assert_eq!(run.writes, 1);
-        assert!(error.to_string().contains("no storage node lists it yet"));
+        assert!(error.to_string().contains("listed this tape up to track 7"));
         assert!(!error.to_string().contains("concurrent"));
     }
 
