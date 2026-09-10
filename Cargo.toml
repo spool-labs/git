@@ -1,6 +1,6 @@
 [package]
 name = "tape-git-remote"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "git remote helper that stores repositories on Tapedrive: git clone/pull/push over tape://"
 license = "Apache-2.0"
