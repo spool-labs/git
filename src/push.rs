@@ -16,7 +16,7 @@ use tape_core::types::TrackNumber;
 use crate::fetch::{load_installed, save_installed};
 use crate::git::{self, Repository};
 use crate::index::{Index, PackEntry};
-use crate::store::Store;
+use crate::store::{not_listed, Store};
 
 /// How many times to re-read, re-merge and re-write the index before giving up
 const PUSH_ATTEMPTS: u64 = 5;
@@ -175,6 +175,77 @@ pub fn is_satisfied(index: &Index, decision: &Decision, pack: Option<&PackEntry>
     true
 }
 
+/// What a version listing says about the index version this process just wrote
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Landing {
+    /// Ours is the newest version and it sits directly on the base it merged
+    Clean,
+
+    /// Somebody else wrote between our base and now
+    Conflict,
+
+    /// The listing does not reach our version at all
+    NotVisible,
+}
+
+/// The newest index version this process did not write, under `ceiling` if given
+pub fn newest_foreign(
+    versions: &[TrackNumber],
+    ours: &[TrackNumber],
+    ceiling: Option<TrackNumber>,
+) -> Option<TrackNumber> {
+    for version in versions.iter().rev() {
+        if ours.contains(version) {
+            continue;
+        }
+        if let Some(ceiling) = ceiling {
+            if version.0 >= ceiling.0 {
+                continue;
+            }
+        }
+
+        return Some(*version);
+    }
+
+    None
+}
+
+/// What a listing says about the version we wrote; our own earlier versions are not competitors
+pub fn landing(
+    base: Option<TrackNumber>,
+    written: TrackNumber,
+    ours: &[TrackNumber],
+    versions: &[TrackNumber],
+) -> Landing {
+    if !versions.contains(&written) {
+        return Landing::NotVisible;
+    }
+
+    let below = newest_foreign(versions, ours, Some(written));
+    if versions.last() == Some(&written) && below == base {
+        return Landing::Clean;
+    }
+
+    Landing::Conflict
+}
+
+/// A head we wrote only counts once its recorded parent is the newest version somebody else wrote
+pub fn is_head_settled(
+    head: Option<TrackNumber>,
+    ours: &[TrackNumber],
+    parent: Option<u64>,
+    base: Option<TrackNumber>,
+) -> bool {
+    let Some(track) = head else {
+        return true;
+    };
+    if !ours.contains(&track) {
+        return true;
+    }
+
+    parent == base.map(|track| track.0)
+}
+
 /// Pick a remote HEAD when it is unset or dangling
 ///
 /// A shared remote's default branch must not flip to whatever branch the most
@@ -293,15 +364,13 @@ async fn publish(
     let mut results = Vec::new();
 
     for attempt in 1..=PUSH_ATTEMPTS {
-        let versions = store.index_versions().await?;
+        // Re-basing on a listing that stops below our last write would repeat the same merge
+        let versions = match ours.last() {
+            Some(track) => store.index_versions_including(*track).await?,
+            None => store.index_versions().await?,
+        };
         let head_version = versions.last().copied();
-        let mut base_version = None;
-        for version in versions.iter().rev() {
-            if !ours.contains(version) {
-                base_version = Some(*version);
-                break;
-            }
-        }
+        let base_version = newest_foreign(&versions, &ours, None);
 
         let mut index = match base_version {
             Some(track) => store.read_index_at(track).await?,
@@ -319,7 +388,9 @@ async fn publish(
             Some(track) => store.read_index_at(track).await?,
             None => Index::default(),
         };
-        if is_satisfied(&visible, &decision, pack) {
+        if is_satisfied(&visible, &decision, pack)
+            && is_head_settled(head_version, &ours, visible.parent, base_version)
+        {
             break;
         }
 
@@ -337,16 +408,11 @@ async fn publish(
         // what we need without touching content. We won without a race when nothing
         // landed after us and the version directly below ours is exactly the base we
         // merged against.
-        let after = store.index_versions().await?;
-        let mut below = None;
-        for version in after.iter().rev() {
-            if version.0 < written.0 {
-                below = Some(*version);
-                break;
-            }
-        }
-        if after.last() == Some(&written) && below == base_version {
-            break;
+        let after = store.index_versions_including(written).await?;
+        match landing(base_version, written, &ours, &after) {
+            Landing::Clean => break,
+            Landing::NotVisible => return Err(not_listed(written)),
+            Landing::Conflict => {}
         }
 
         if attempt == PUSH_ATTEMPTS {
@@ -403,6 +469,101 @@ mod tests {
 
     fn repository() -> Repository {
         Repository::at(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[derive(Default)]
+    struct Run {
+        ours: Vec<TrackNumber>,
+        parents: Vec<Option<u64>>,
+        bases: Vec<Option<TrackNumber>>,
+        writes: usize,
+    }
+
+    fn seeded(track: u64, parent: u64) -> Run {
+        Run {
+            ours: vec![TrackNumber(track)],
+            parents: vec![Some(parent)],
+            ..Run::default()
+        }
+    }
+
+    fn serve(script: &[&[u64]], served: &mut usize) -> Vec<TrackNumber> {
+        let listing = script[(*served).min(script.len() - 1)];
+        *served += 1;
+
+        let mut versions = Vec::new();
+        for track in listing {
+            versions.push(TrackNumber(*track));
+        }
+
+        versions
+    }
+
+    // Stands in for reading the head index back and checking it against the decision
+    fn is_accepting(
+        run: &Run,
+        head: Option<TrackNumber>,
+        satisfying: &[u64],
+        base: Option<TrackNumber>,
+    ) -> bool {
+        let Some(track) = head else {
+            return false;
+        };
+
+        let mut parent = None;
+        let mut is_ours = false;
+        for (at, our) in run.ours.iter().enumerate() {
+            if *our == track {
+                parent = run.parents[at];
+                is_ours = true;
+                break;
+            }
+        }
+        if !is_ours && !satisfying.contains(&track.0) {
+            return false;
+        }
+
+        is_head_settled(head, &run.ours, parent, base)
+    }
+
+    // The publish loop over scripted listings, one served per call, with no store
+    fn drive(script: &[&[u64]], writes: &[u64], satisfying: &[u64], run: &mut Run) -> Result<()> {
+        let mut served = 0;
+
+        for attempt in 1..=PUSH_ATTEMPTS {
+            let versions = serve(script, &mut served);
+            if let Some(track) = run.ours.last() {
+                if !versions.contains(track) {
+                    return Err(not_listed(*track));
+                }
+            }
+
+            let base = newest_foreign(&versions, &run.ours, None);
+            run.bases.push(base);
+
+            let head = versions.last().copied();
+            if is_accepting(run, head, satisfying, base) {
+                return Ok(());
+            }
+
+            let written = TrackNumber(writes[run.writes]);
+            run.writes += 1;
+            run.ours.push(written);
+            run.parents.push(base.map(|track| track.0));
+
+            let after = serve(script, &mut served);
+            match landing(base, written, &run.ours, &after) {
+                Landing::Clean => return Ok(()),
+                Landing::NotVisible => return Err(not_listed(written)),
+                Landing::Conflict => {}
+            }
+
+            if attempt == PUSH_ATTEMPTS {
+                bail!("concurrent push detected");
+            }
+        }
+
+        Ok(())
     }
 
     // a plain refspec splits into source and destination
@@ -487,6 +648,85 @@ mod tests {
             None
         ));
         assert!(is_satisfied(&Index::default(), &decision, None));
+    }
+
+    // a listing that reaches our own version over our base settles the push
+    #[test]
+    fn clean_write() {
+        let mut run = Run::default();
+
+        drive(&[&[4], &[4, 7]], &[7], &[], &mut run).expect("push should settle");
+
+        assert_eq!(run.writes, 1);
+        assert_eq!(run.bases, vec![Some(TrackNumber(4))]);
+    }
+
+    // a version between our base and our write re-bases the next attempt on it
+    #[test]
+    fn merge_between() {
+        let mut run = Run::default();
+        let script: [&[u64]; 4] = [&[4], &[4, 5, 7], &[4, 5, 7], &[4, 5, 7, 9]];
+
+        drive(&script, &[7, 9], &[], &mut run).expect("push should settle");
+
+        assert_eq!(run.writes, 2);
+        assert_eq!(run.bases, vec![Some(TrackNumber(4)), Some(TrackNumber(5))]);
+    }
+
+    // our own superseded version between the base and our write is not a competitor
+    #[test]
+    fn supersedes_own() {
+        let ours = [TrackNumber(7), TrackNumber(9)];
+        let versions = [TrackNumber(4), TrackNumber(7), TrackNumber(9)];
+
+        let verdict = landing(Some(TrackNumber(4)), TrackNumber(9), &ours, &versions);
+
+        assert_eq!(verdict, Landing::Clean);
+    }
+
+    // a head we wrote that skipped a competitor is merged instead of accepted
+    #[test]
+    fn own_head_stale() {
+        let mut run = seeded(7, 4);
+
+        drive(&[&[4, 5, 7], &[4, 5, 7, 9]], &[9], &[], &mut run).expect("push should settle");
+
+        assert_eq!(run.writes, 1);
+        assert_eq!(run.bases, vec![Some(TrackNumber(5))]);
+    }
+
+    // a head we wrote over the newest version somebody else wrote ends the push
+    #[test]
+    fn own_head_current() {
+        let mut run = seeded(7, 4);
+
+        drive(&[&[4, 7]], &[], &[], &mut run).expect("push should settle");
+
+        assert_eq!(run.writes, 0);
+        assert_eq!(run.bases, vec![Some(TrackNumber(4))]);
+    }
+
+    // a version written after ours ends the push once it satisfies the update
+    #[test]
+    fn accepts_newer() {
+        let mut run = Run::default();
+
+        drive(&[&[4], &[4, 7, 9]], &[7], &[9], &mut run).expect("push should settle");
+
+        assert_eq!(run.writes, 1);
+        assert_eq!(run.bases[1], Some(TrackNumber(9)));
+    }
+
+    // a listing that never reaches our version is reported as such, without writing again
+    #[test]
+    fn never_listed() {
+        let mut run = Run::default();
+
+        let error = drive(&[&[4], &[4]], &[7], &[], &mut run).expect_err("push should stop");
+
+        assert_eq!(run.writes, 1);
+        assert!(error.to_string().contains("no storage node lists it yet"));
+        assert!(!error.to_string().contains("concurrent"));
     }
 
     // an established head is never moved by a later push
