@@ -13,18 +13,6 @@ path = "src/main.rs"
 [workspace]
 
 [dependencies]
-# Tapedrive crates, taken from crates.io like any other dependency.
-#
-# To build against a local checkout of the tape monorepo instead, copy
-# `.cargo/config.toml.example` to `.cargo/config.toml`. Its `[patch.crates-io]`
-# block redirects these six to relative paths, with no edit here and no change
-# to the lockfile's shape.
-#
-# `tape-sdk` does the verified read and the certified write. The other five exist
-# only to name types that appear in the SDK's signatures but that it does not
-# re-export: `Address`, `TrackNumber`, `ContentType`, `track_pda`, and the
-# `HttpApi` / `SolanaRpc` clients it is generic over. If the SDK re-exported
-# those, this crate would need one dependency instead of six.
 tape-sdk = "0.4"
 tape-api = "0.4"
 tape-core = "0.4"
