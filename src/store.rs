@@ -8,13 +8,14 @@ use anyhow::{anyhow, bail, Context, Error, Result};
 use peer_http::HttpApi;
 use rpc_solana::{RpcConfig, SolanaRpc};
 use tape_api::program::tapedrive::track_pda;
-use tape_core::types::{ContentType, TrackNumber};
+use tape_core::types::{ContentType, StorageUnits, TrackNumber};
 use tape_crypto::ed25519::Keypair;
 use tape_crypto::hash::hash;
 use tape_crypto::prelude::Address;
 use tape_sdk::error::TapedriveError;
 use tape_sdk::keys::helpers::load_ed25519_keypair;
 use tape_sdk::keys::tape_key::TapeKey;
+use tape_sdk::stream::manifest::MAX_TRACK_SIZE;
 use tape_sdk::{Gateway, Tapedrive};
 
 use crate::index::{digest, Index, PackEntry, INDEX_CONTENT_TYPE, INDEX_NAME};
@@ -534,17 +535,31 @@ impl Store {
     /// in the bucket's object listing.
     pub async fn write_pack(&self, pack: &[u8]) -> Result<PackEntry> {
         let key = self.writable()?;
-        let track = self
-            .sdk
-            .write_track(key, pack)
-            .await
-            .map_err(|error| anyhow!("write pack ({} bytes): {error}", pack.len()))?;
+        let size = pack.len() as u64;
+
+        // One track holds at most MAX_TRACK_SIZE bytes, so a bigger pack goes
+        // out as a stream and the index points at its manifest
+        let (track, stream) = if pack.len() > MAX_TRACK_SIZE {
+            let receipt = self
+                .sdk
+                .write_stream(key, StorageUnits::from_bytes(size), pack)
+                .await
+                .map_err(|error| anyhow!("write pack stream ({size} bytes): {error}"))?;
+            (receipt.manifest_track_number, true)
+        } else {
+            let track = self
+                .sdk
+                .write_track(key, pack)
+                .await
+                .map_err(|error| anyhow!("write pack ({size} bytes): {error}"))?;
+            (track.track_number, false)
+        };
 
         Ok(PackEntry {
-            track: track.track_number.0,
-            size: pack.len() as u64,
+            track: track.0,
+            size,
             digest: digest(pack),
-            stream: false,
+            stream,
         })
     }
 
