@@ -6508,9 +6508,9 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tape-api"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0efbfe3b25a1d440c654dba5280899490eb1f74cc99de59ee3e59d0997a68b9a"
+checksum = "d70cb740f9b6a30ac53c41e700e004d83199e5c3bbeded8437597c90c2a948f3"
 dependencies = [
  "array-const-fn-init",
  "bytemuck",
@@ -6533,9 +6533,9 @@ checksum = "a9b3fce14bc6ba0c53705bc2cd9afa08e11d102a94c9bf65f03751b394f4af24"
 
 [[package]]
 name = "tape-blocks"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcdc76b39ed3e837c5babb97591c38fe1f57261365c6b4f0d14cc3a28f08eac4"
+checksum = "6b357fac87e125b1eb9d09a8cd80ee6b01e27228fb4afeb74890bb8a796c096a"
 dependencies = [
  "base64 0.13.1",
  "bs58",
@@ -6552,9 +6552,9 @@ dependencies = [
 
 [[package]]
 name = "tape-core"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c1adb23f3bc1e6e0f9d0994ef9247a580641ba00bda3334761e912c8be0fc0"
+checksum = "c0371e84e450c72685c506fddacb0abf9f3dee8f9ae931d63f63bf711e96744b"
 dependencies = [
  "bytemuck",
  "num_enum",
@@ -6567,9 +6567,9 @@ dependencies = [
 
 [[package]]
 name = "tape-crypto"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4aa5c811e640575972ff8db0bb6bc4dec080f1b196e22626a3d2f697cff8f4b3"
+checksum = "fe9033e54aa8804936a981b0a11fd492273bd0a9863ec0a813497aff850ffcbb"
 dependencies = [
  "ark-bn254",
  "ark-ec",
@@ -6603,7 +6603,7 @@ dependencies = [
 
 [[package]]
 name = "tape-git-remote"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "dirs",
@@ -6622,9 +6622,9 @@ dependencies = [
 
 [[package]]
 name = "tape-observe-api"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77fd7c6129d3c488ac2e929868879b42f2fcec7e6d70dcc86f0e5dd4074a0bcb"
+checksum = "0e89afc02a19aa0ee30bed7fe725db3f5f6001add83da2cb149c00141bd5825d"
 dependencies = [
  "serde",
  "wincode 0.1.2",
@@ -6633,9 +6633,9 @@ dependencies = [
 
 [[package]]
 name = "tape-peer-http"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1257d379b0319eb5417e01b680cf594e3250ebe385f92994468647d7a7074daf"
+checksum = "4fbfdb30b7f7cbc46ce554b096b54053c25b562d60f7b24b9d16b4f7ded86eb9"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6654,9 +6654,9 @@ dependencies = [
 
 [[package]]
 name = "tape-peer-manager"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5361a00b84018005cf556a20bb5ffd5637a870a58918a019f0dcb8c9d48d2c55"
+checksum = "69f31cd1d5edf0017229837332c182fa15e1787f29f7833948e495334e64c620"
 dependencies = [
  "arc-swap",
  "dashmap 6.2.1",
@@ -6671,9 +6671,9 @@ dependencies = [
 
 [[package]]
 name = "tape-peer-tls"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1ee673762ad1002a3490cf69e3725307f78543240ac07a470413d94e34a8fe3"
+checksum = "d7f0715ccccd835ba64f76ed55fe24ed22273cac6f4cb9c299935a70868cee19"
 dependencies = [
  "rcgen",
  "reqwest",
@@ -6687,9 +6687,9 @@ dependencies = [
 
 [[package]]
 name = "tape-protocol"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98d9ce600c15f9b2ba8ee73b9cde8fdebf5bc6bc0af64995d5160ee314c8981f"
+checksum = "893ba542bd8582379535277c6983b81ee270fc1f0528bf85b9f3b027f7b57c25"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -6721,9 +6721,9 @@ checksum = "00345f09c4aaac65268873f11706ff1e7f7cfe974bdbdef0341253f4182ecb93"
 
 [[package]]
 name = "tape-retry"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b341c3a939ecae7cea065a8004c1ac7741c0d86b1be3cb6a3d6699d3f1bc360b"
+checksum = "1d8be6f822c080e78feca0caf210e644bb60d3f82bdd7ff9ccbeea13d01a645b"
 dependencies = [
  "rand 0.8.8",
  "tokio",
@@ -6733,9 +6733,9 @@ dependencies = [
 
 [[package]]
 name = "tape-rpc"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb9a1aa6e9873fea1c092cac6283bd23b20098a5b59155d14285c8d066496885"
+checksum = "e561e551a584a890416b61c2eb11f295936ca7b1f08d1c90154354d7546f69d5"
 dependencies = [
  "async-trait",
  "solana-account 4.3.2",
@@ -6754,9 +6754,9 @@ dependencies = [
 
 [[package]]
 name = "tape-rpc-client"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "691083c129c75e8767e4630716e248cf46d5b2b9a83db87cd2f7eae5de1778cc"
+checksum = "378238688bbb530945fc55692338768a49b8fd324a253c3f2345c3ae29d2ff11"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6788,9 +6788,9 @@ dependencies = [
 
 [[package]]
 name = "tape-rpc-solana"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ebe0f72a98a06bfd317aff23c18fe8fc7ade0bb89c9ff1dfbb9624bd714784c"
+checksum = "74cd8c789377d960a5f7c802857cabdd2faea6d9935fd4d4bbb2f85407f064c2"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -6818,9 +6818,9 @@ dependencies = [
 
 [[package]]
 name = "tape-sdk"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18770008f3c1c7a6b098ca55b57d753ffb3e507675e2f3bea4f89fcf09588220"
+checksum = "11ed78ae814301894fbd39a11c1ffbf09658fdda340f471a709135ddb452cc17"
 dependencies = [
  "arc-swap",
  "bytemuck",
@@ -6862,9 +6862,9 @@ checksum = "ecfcb393a3304db7c48a8ce2f3a51aa9188ce00ae6bb2c9e03dcd0f3fc3d6da9"
 
 [[package]]
 name = "tape-slicer"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b8d4083aff2d84f05aa47aaee09a0d011e34bf91cfbc47e013f633ee8afe2ec"
+checksum = "3516ffbda9abf38b841ba4a30994abc678731d83aad42952a4a70ca02f488156"
 dependencies = [
  "bytemuck",
  "clay-codes",
@@ -6880,9 +6880,9 @@ dependencies = [
 
 [[package]]
 name = "tape-snapshot"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0b1ec21c0c60d62139c583b60605587622c5c4a7e56ceea9573f744f8f6d864"
+checksum = "836f88c6e2b9c615472ab32353e97c7727275f71eccdb469a0b32fbabec8f07b"
 dependencies = [
  "bytemuck",
  "lz4_flex",
@@ -6894,9 +6894,9 @@ dependencies = [
 
 [[package]]
 name = "tape-solana"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b3f0716526898edf5382c9ea408488882d3c381cbaabbffbbb20f902440b1a7"
+checksum = "905538884a436f988e3da487ed5314781228638929628a4e8d0483df8702e3b5"
 dependencies = [
  "bytemuck",
  "num_enum",
@@ -7489,7 +7489,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
