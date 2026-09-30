@@ -19,7 +19,8 @@ use tape_sdk::{Gateway, Tapedrive};
 
 use crate::index::{digest, Index, PackEntry, INDEX_CONTENT_TYPE, INDEX_NAME};
 
-const DEFAULT_RPC: &str = "https://api.devnet.solana.com";
+const DEFAULT_RPC: &str = "https://devnet.tape.network";
+const FALLBACK_RPC: &str = "https://api.devnet.solana.com";
 
 /// Where the `tape` CLI files a tape keypair, relative to the home directory
 const CASSETTE_DIR: &str = ".tape/cassettes";
@@ -80,13 +81,13 @@ pub struct Store {
     has_payer: bool,
 }
 
-/// Build an RPC handle for the configured endpoint
-fn open_rpc(rpc_url: &str) -> Result<SolanaRpc> {
+/// Build an RPC handle over the configured endpoints, tried in order
+fn open_rpc(endpoints: &[String]) -> Result<SolanaRpc> {
     SolanaRpc::new(RpcConfig {
-        endpoints: vec![rpc_url.to_string()],
+        endpoints: endpoints.to_vec(),
         ..Default::default()
     })
-    .map_err(|error| anyhow!("solana rpc {rpc_url}: {error}"))
+    .map_err(|error| anyhow!("solana rpc {}: {error}", endpoints.join(", ")))
 }
 
 /// Locate a fee payer, if there is one to find
@@ -144,7 +145,7 @@ fn load_cassette(bucket: Address) -> Result<Option<TapeKey>> {
 }
 
 /// Build a gateway client when one is configured
-fn open_gateway(rpc_url: &str) -> Result<Option<Gateway<SolanaRpc>>> {
+fn open_gateway(endpoints: &[String]) -> Result<Option<Gateway<SolanaRpc>>> {
     let Ok(url) = std::env::var("TAPE_GATEWAY_URL") else {
         return Ok(None);
     };
@@ -154,7 +155,7 @@ fn open_gateway(rpc_url: &str) -> Result<Option<Gateway<SolanaRpc>>> {
     }
 
     // A gateway needs its own RPC handle, because the SDK takes one by value.
-    let gateway = Tapedrive::new_gateway_read_only(open_rpc(rpc_url)?, url)
+    let gateway = Tapedrive::new_gateway_read_only(open_rpc(endpoints)?, url)
         .map_err(|error| anyhow!("gateway {url}: {error}"))?;
 
     Ok(Some(gateway))
@@ -170,13 +171,17 @@ impl Store {
             .parse()
             .map_err(|_| anyhow!("`{bucket}` is not a tape address"))?;
 
-        let rpc_url = std::env::var("TAPE_RPC_URL").unwrap_or_else(|_| DEFAULT_RPC.to_string());
+        // Tapedrive's RPC first, then Solana's public devnet, as the tape CLI does
+        let endpoints = match std::env::var("TAPE_RPC_URL") {
+            Ok(url) => vec![url],
+            Err(_) => vec![DEFAULT_RPC.to_string(), FALLBACK_RPC.to_string()],
+        };
         let payer = load_payer()?;
         let cassette = load_cassette(bucket)?;
-        let gateway = open_gateway(&rpc_url)?;
+        let gateway = open_gateway(&endpoints)?;
 
         let has_payer = payer.is_some();
-        let rpc = open_rpc(&rpc_url)?;
+        let rpc = open_rpc(&endpoints)?;
         let sdk = match payer {
             Some(payer) => Tapedrive::new(rpc, payer),
             None => Tapedrive::new_read_only(rpc),

@@ -104,7 +104,7 @@ payer and the key controlling the destination tape.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `TAPE_RPC_URL` | `https://api.devnet.solana.com` | Solana RPC endpoint |
+| `TAPE_RPC_URL` | `https://devnet.tape.network`, then `https://api.devnet.solana.com` | Solana RPC endpoint |
 | `TAPE_GATEWAY_URL` | Direct storage-node reads | Optional gateway for bulk reads |
 | `TAPE_KEYPAIR` | `~/.config/solana/id.json`, when present | Transaction fee payer for pushes |
 | `TAPE_CASSETTE` | `~/.tape/cassettes/<tape-address>.json` | Key controlling the tape |
