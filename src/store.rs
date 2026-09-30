@@ -19,6 +19,7 @@ use tape_sdk::stream::manifest::MAX_TRACK_SIZE;
 use tape_sdk::{Gateway, Tapedrive};
 
 use crate::index::{digest, Index, PackEntry, INDEX_CONTENT_TYPE, INDEX_NAME};
+use crate::progress::{MeteredBuffer, Progress};
 
 const DEFAULT_RPC: &str = "https://devnet.tape.network";
 const FALLBACK_RPC: &str = "https://api.devnet.solana.com";
@@ -487,16 +488,18 @@ impl Store {
     /// so its digest is a trustworthy statement about the pack. That is what makes
     /// it safe to take the bulk bytes from an untrusted gateway: a mismatch means
     /// we throw them away and go direct.
-    pub async fn read_pack(&self, entry: &PackEntry) -> Result<Vec<u8>> {
+    pub async fn read_pack(&self, entry: &PackEntry, progress: &mut Progress) -> Result<Vec<u8>> {
         let track = TrackNumber(entry.track);
 
         if entry.stream {
             let address = track_pda(self.bucket, track).0;
-            let bytes = self
-                .sdk
-                .read_bytes(&address)
+            // The SDK writes each chunk as it arrives, so the meter moves per chunk
+            let mut buffer = MeteredBuffer { bytes: Vec::new(), progress };
+            self.sdk
+                .read_into(&address, &mut buffer)
                 .await
                 .map_err(|error| anyhow!("read pack stream at track {}: {error}", entry.track))?;
+            let bytes = buffer.bytes;
             if !entry.matches(&bytes) {
                 bail!(
                     "pack stream at track {} does not match the digest the index recorded",
@@ -508,6 +511,7 @@ impl Store {
 
         if let Some(bytes) = self.gateway_bytes(track).await {
             if entry.matches(&bytes) {
+                progress.advance(bytes.len() as u64);
                 return Ok(bytes);
             }
             eprintln!(
@@ -524,6 +528,7 @@ impl Store {
                 entry.track
             );
         }
+        progress.advance(bytes.len() as u64);
 
         Ok(bytes)
     }

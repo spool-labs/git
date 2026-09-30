@@ -131,13 +131,20 @@ impl Repository {
     }
 
     /// Install a packfile into this repository.
-    pub fn index_pack(&self, pack: &[u8]) -> Result<()> {
-        let mut child = self
-            .command()
-            .args(["index-pack", "--stdin", "--fix-thin"])
+    ///
+    /// With `is_progress` set, git prints its own receiving and resolving lines
+    /// straight to the terminal.
+    pub fn index_pack(&self, pack: &[u8], is_progress: bool) -> Result<()> {
+        let mut command = self.command();
+        command.args(["index-pack", "--stdin", "--fix-thin"]);
+        if is_progress {
+            command.arg("-v").stderr(Stdio::inherit());
+        } else {
+            command.stderr(Stdio::piped());
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .spawn()
             .context("spawn git index-pack")?;
 

@@ -11,10 +11,17 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use crate::git::{self, Repository};
+use crate::progress::Progress;
 use crate::store::Store;
 
 /// File under the git directory recording which packs are already installed
 const INSTALLED_PACKS: &str = "tape/installed-packs";
+
+/// Directory under the git directory holding downloaded packs until they are indexed
+const INCOMING_PACKS: &str = "tape/incoming";
+
+/// Packs smaller than this index in a blink, so git's own progress would only add lines
+const PACK_PROGRESS_MIN_BYTES: u64 = 1024 * 1024;
 
 fn installed_path(repository: &Repository) -> Result<PathBuf> {
     Ok(repository.git_dir()?.join(INSTALLED_PACKS))
@@ -58,33 +65,55 @@ pub fn save_installed(repository: &Repository, installed: &BTreeSet<String>) -> 
 }
 
 /// Handle git's `fetch` batch
-pub async fn fetch(store: &Store, repository: &Repository) -> Result<()> {
+///
+/// Every missing pack downloads under one progress line and waits on disk, then
+/// each is indexed. With `is_progress` set, git prints its own receiving and
+/// resolving lines for any pack big enough to take a moment.
+pub async fn fetch(store: &Store, repository: &Repository, is_progress: bool) -> Result<()> {
     let Some((index, _)) = store.read_index().await? else {
         return Ok(());
     };
 
     let mut installed = load_installed(repository);
-    let mut fetched = 0u64;
-
+    let mut missing = Vec::new();
+    let mut total_bytes = 0;
     for entry in &index.packs {
-        let key = store.installed_key(entry.track);
-        if installed.contains(&key) {
-            continue;
+        if !installed.contains(&store.installed_key(entry.track)) {
+            total_bytes += entry.size;
+            missing.push(entry);
         }
+    }
+    let count = missing.len();
+    if count == 0 {
+        return Ok(());
+    }
 
-        eprintln!("tape: fetching pack {} ({} bytes)", entry.track, entry.size);
-        let pack = store.read_pack(entry).await?;
+    let incoming = repository.git_dir()?.join(INCOMING_PACKS);
+    std::fs::create_dir_all(&incoming).context("create the incoming pack directory")?;
+
+    let mut progress = Progress::start("Downloading packs", count, total_bytes, is_progress);
+    let mut downloaded = Vec::with_capacity(count);
+    for entry in &missing {
+        let pack = store.read_pack(entry, &mut progress).await?;
+        let path = incoming.join(format!("{}.pack", entry.track));
+        std::fs::write(&path, &pack).with_context(|| format!("write {}", path.display()))?;
+        downloaded.push((entry, path));
+        progress.complete_item();
+    }
+    progress.finish();
+
+    for (entry, path) in downloaded {
+        let pack = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         if git::pack_object_count(&pack) > 0 {
-            repository.index_pack(&pack)?;
+            let is_pack_progress = is_progress && entry.size >= PACK_PROGRESS_MIN_BYTES;
+            repository.index_pack(&pack, is_pack_progress)?;
         }
-
-        installed.insert(key);
-        fetched += 1;
+        std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+        installed.insert(store.installed_key(entry.track));
     }
+    std::fs::remove_dir(&incoming).with_context(|| format!("remove {}", incoming.display()))?;
 
-    if fetched > 0 {
-        save_installed(repository, &installed)?;
-    }
+    save_installed(repository, &installed)?;
 
     Ok(())
 }

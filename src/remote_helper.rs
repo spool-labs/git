@@ -12,6 +12,8 @@ pub async fn run_from_env() -> Result<()> {
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     let mut out = std::io::stdout();
+    // Git sends `option progress` before any fetch; until then, stay quiet
+    let mut is_progress = false;
 
     while let Some(line) = lines.next() {
         let line = line.context("read command")?;
@@ -23,12 +25,20 @@ pub async fn run_from_env() -> Result<()> {
             capabilities(&mut out)?;
         } else if command == "list" || command == "list for-push" {
             list(&store, &mut out).await?;
-        } else if command.starts_with("option ") {
-            writeln!(out, "unsupported")?;
+        } else if let Some(option) = command.strip_prefix("option ") {
+            let reply = match option.split_once(' ') {
+                Some(("progress", value)) => {
+                    is_progress = value == "true";
+                    "ok"
+                }
+                Some(("verbosity", _)) => "ok",
+                Some(_) | None => "unsupported",
+            };
+            writeln!(out, "{reply}")?;
             out.flush()?;
         } else if command.starts_with("fetch ") {
             drain_batch(&mut lines)?;
-            crate::fetch::fetch(&store, &repository).await?;
+            crate::fetch::fetch(&store, &repository, is_progress).await?;
             writeln!(out)?;
             out.flush()?;
         } else if let Some(first) = command.strip_prefix("push ") {

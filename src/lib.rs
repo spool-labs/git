@@ -6,6 +6,7 @@
 
 mod fetch;
 mod git;
+mod progress;
 mod push;
 mod store;
 
