@@ -57,6 +57,12 @@ const TRACK_PAGE_SIZE: u32 = 1_000;
 /// Backoff between listings while one catches up with the chain, last entry never slept on
 const INDEX_LISTING_BACKOFF_MS: [u64; 8] = [100, 250, 500, 1_000, 2_000, 4_000, 8_000, 0];
 
+/// Waits shorter than this stay silent
+///
+/// Storage nodes list a new track a second or two after the chain has it, so
+/// every push waits on them; only a wait past this point is worth a line.
+const QUIET_WAIT_MS: u64 = 3_000;
+
 pub struct Store {
     /// Direct peer client
     ///
@@ -304,16 +310,20 @@ impl Store {
     async fn read_track(&self, track: TrackNumber) -> Result<Vec<u8>> {
         let address = track_pda(self.bucket, track).0;
         let mut last_error = None;
+        let mut waited_ms = 0;
 
         for (attempt, backoff) in READ_BACKOFF_MS.iter().enumerate() {
             match self.sdk.read(&address).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(error) => {
                     if attempt + 1 < READ_BACKOFF_MS.len() {
-                        eprintln!(
-                            "tape: track {} not readable yet ({error}); retrying in {backoff}ms",
-                            track.0
-                        );
+                        if crosses_quiet_wait(waited_ms, *backoff) {
+                            eprintln!(
+                                "tape: track {} is not readable yet ({error}); still retrying",
+                                track.0
+                            );
+                        }
+                        waited_ms += backoff;
                         tokio::time::sleep(Duration::from_millis(*backoff)).await;
                     }
                     last_error = Some(error);
@@ -366,6 +376,7 @@ impl Store {
     /// Every version of the ref index, with the highest track number the listing reached
     async fn index_versions_seen(&self) -> Result<(Vec<TrackNumber>, TrackNumber)> {
         let mut last_error = None;
+        let mut waited_ms = 0;
         for (attempt, backoff) in ACCOUNT_PROPAGATION_BACKOFF_MS.iter().enumerate() {
             match self.index_versions_once().await {
                 Ok(seen) => return Ok(seen),
@@ -373,9 +384,10 @@ impl Store {
                     if is_account_propagation_error(&error)
                         && attempt + 1 < ACCOUNT_PROPAGATION_BACKOFF_MS.len() =>
                 {
-                    eprintln!(
-                        "tape: tape account is not visible yet; retrying in {backoff}ms"
-                    );
+                    if crosses_quiet_wait(waited_ms, *backoff) {
+                        eprintln!("tape: tape account is not visible yet; still retrying");
+                    }
+                    waited_ms += backoff;
                     tokio::time::sleep(Duration::from_millis(*backoff)).await;
                     last_error = Some(error);
                 }
@@ -393,6 +405,13 @@ impl Store {
     pub async fn index_versions_complete(&self, at_least: TrackNumber) -> Result<Vec<TrackNumber>> {
         let target = self.listing_target(at_least).await;
 
+        self.index_versions_reaching(target).await
+    }
+
+    /// Every version of the ref index, from a listing that reaches `target`
+    pub async fn index_versions_reaching(&self, target: TrackNumber) -> Result<Vec<TrackNumber>> {
+        let mut waited_ms = 0;
+
         for (attempt, backoff) in INDEX_LISTING_BACKOFF_MS.iter().enumerate() {
             let (versions, highest) = self.index_versions_seen().await?;
             if highest.0 >= target.0 {
@@ -400,10 +419,13 @@ impl Store {
             }
 
             if attempt + 1 < INDEX_LISTING_BACKOFF_MS.len() {
-                eprintln!(
-                    "tape: listing has reached track {} of {}; retrying in {backoff}ms",
-                    highest.0, target.0
-                );
+                if crosses_quiet_wait(waited_ms, *backoff) {
+                    eprintln!(
+                        "tape: waiting for storage nodes to list track {} (listed up to {})",
+                        target.0, highest.0
+                    );
+                }
+                waited_ms += backoff;
                 tokio::time::sleep(Duration::from_millis(*backoff)).await;
             }
         }
@@ -412,7 +434,7 @@ impl Store {
     }
 
     /// The track number a listing has to reach before a merge can trust it
-    async fn listing_target(&self, at_least: TrackNumber) -> TrackNumber {
+    pub async fn listing_target(&self, at_least: TrackNumber) -> TrackNumber {
         match self.sdk.get_tape(&self.bucket).await {
             Ok(tape) => {
                 let newest = tape.tracks.next_number().0.saturating_sub(1);
@@ -567,6 +589,11 @@ fn is_account_propagation_category(category: &str) -> bool {
     category == "not_found"
 }
 
+/// Whether this backoff carries a wait past the quiet point, true only for the one that crosses it
+fn crosses_quiet_wait(waited_ms: u64, backoff_ms: u64) -> bool {
+    waited_ms < QUIET_WAIT_MS && waited_ms + backoff_ms >= QUIET_WAIT_MS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,5 +604,20 @@ mod tests {
         assert!(!is_account_propagation_category("rpc_error"));
         assert!(!is_account_propagation_category("timeout"));
         assert!(!is_account_propagation_category("tx_error"));
+    }
+
+    #[test]
+    fn quiet_wait() {
+        let mut waited_ms = 0;
+        let mut crossings = 0;
+        for backoff in INDEX_LISTING_BACKOFF_MS {
+            if crosses_quiet_wait(waited_ms, backoff) {
+                crossings += 1;
+            }
+            waited_ms += backoff;
+        }
+
+        assert!(!crosses_quiet_wait(0, 1_850));
+        assert_eq!(crossings, 1);
     }
 }

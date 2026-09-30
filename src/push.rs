@@ -356,6 +356,7 @@ async fn publish(
     repository: &Repository,
     specs: &[Spec],
     pack: Option<&PackEntry>,
+    head_before_pack: TrackNumber,
 ) -> Result<Vec<String>> {
     // Index versions this process wrote. Deciding against our own version would
     // re-derive our own state and miss a pusher we shadowed, so a retry always
@@ -364,9 +365,14 @@ async fn publish(
     let mut results = Vec::new();
 
     for attempt in 1..=PUSH_ATTEMPTS {
-        // Merging on a listing that lags the chain drops refs another pusher landed
-        let at_least = ours.last().copied().unwrap_or(TrackNumber(0));
-        let versions = store.index_versions_complete(at_least).await?;
+        // Merging on a listing that lags the chain drops refs another pusher landed.
+        // The first merge only has to reach the chain as it stood before our pack:
+        // a version landing after that sits between our base and our write, and the
+        // check after the write catches it.
+        let versions = match ours.last() {
+            Some(at_least) => store.index_versions_complete(*at_least).await?,
+            None => store.index_versions_reaching(head_before_pack).await?,
+        };
         let head_version = versions.last().copied();
         let base_version = newest_foreign(&versions, &ours, None);
 
@@ -447,8 +453,9 @@ pub async fn push(
         None => Index::default(),
     };
 
+    let head_before_pack = store.listing_target(TrackNumber(0)).await;
     let pack = store_pack(store, repository, &base, &decide(repository, &parsed, &base)).await?;
-    let results = publish(store, repository, &parsed, pack.as_ref()).await?;
+    let results = publish(store, repository, &parsed, pack.as_ref(), head_before_pack).await?;
 
     for line in results {
         writeln!(out, "{line}")?;
@@ -494,6 +501,9 @@ mod tests {
 
     #[derive(Default)]
     struct Scenario {
+        /// Newest track the chain held before our pack went in, which the first merge waits for
+        before_pack: u64,
+
         /// Listings served in order, the last one repeating once they run out
         listings: Vec<Vec<u64>>,
 
@@ -526,8 +536,11 @@ mod tests {
         chain: u64,
         at_least: u64,
     ) -> Result<Vec<TrackNumber>> {
-        let target = chain.saturating_sub(1).max(at_least);
+        reaching(scenario, served, chain.saturating_sub(1).max(at_least))
+    }
 
+    // Stands in for index_versions_reaching: re-list until one reaches the target
+    fn reaching(scenario: &Scenario, served: &mut usize, target: u64) -> Result<Vec<TrackNumber>> {
         for _ in 0..LISTING_TRIES {
             let versions = serve(scenario, served);
             let highest = match versions.last() {
@@ -575,11 +588,10 @@ mod tests {
 
         for attempt in 1..=PUSH_ATTEMPTS {
             let chain = scenario.chain[((attempt - 1) as usize).min(scenario.chain.len() - 1)];
-            let at_least = match run.ours.last() {
-                Some(track) => track.0,
-                None => 0,
+            let versions = match run.ours.last() {
+                Some(track) => complete(scenario, &mut served, chain, track.0)?,
+                None => reaching(scenario, &mut served, scenario.before_pack)?,
             };
-            let versions = complete(scenario, &mut served, chain, at_least)?;
 
             let base = newest_foreign(&versions, &run.ours, None);
             run.bases.push(base);
@@ -698,6 +710,7 @@ mod tests {
     fn clean_write() {
         let mut run = Run::default();
         let scenario = Scenario {
+            before_pack: 4,
             listings: vec![vec![4], vec![4, 7]],
             chain: vec![5],
             writes: vec![7],
@@ -710,11 +723,12 @@ mod tests {
         assert_eq!(run.bases, vec![Some(TrackNumber(4))]);
     }
 
-    // a listing behind the track count the chain reports is re-listed, never merged on
+    // a listing behind the head the chain held before our pack is re-listed, never merged on
     #[test]
     fn base_waits_for_chain() {
         let mut run = Run::default();
         let scenario = Scenario {
+            before_pack: 7,
             listings: vec![vec![4], vec![4, 7], vec![4, 7, 9]],
             chain: vec![8],
             writes: vec![9],
@@ -732,6 +746,7 @@ mod tests {
     fn merge_between() {
         let mut run = Run::default();
         let scenario = Scenario {
+            before_pack: 4,
             listings: vec![vec![4], vec![4, 5, 7], vec![4, 5, 7], vec![4, 5, 7, 9]],
             chain: vec![5],
             writes: vec![7, 9],
@@ -742,6 +757,24 @@ mod tests {
 
         assert_eq!(run.writes, 2);
         assert_eq!(run.bases, vec![Some(TrackNumber(4)), Some(TrackNumber(5))]);
+    }
+
+    // a version landing past the head the first merge waited for is caught after our write
+    #[test]
+    fn late_version() {
+        let mut run = Run::default();
+        let scenario = Scenario {
+            before_pack: 4,
+            listings: vec![vec![4], vec![4, 6, 8], vec![4, 6, 8], vec![4, 6, 8, 10]],
+            chain: vec![9],
+            writes: vec![8, 10],
+            ..Scenario::default()
+        };
+
+        drive(&scenario, &mut run).expect("push should settle");
+
+        assert_eq!(run.writes, 2);
+        assert_eq!(run.bases, vec![Some(TrackNumber(4)), Some(TrackNumber(6))]);
     }
 
     // our own superseded version between the base and our write is not a competitor
@@ -793,6 +826,7 @@ mod tests {
     fn accepts_newer() {
         let mut run = Run::default();
         let scenario = Scenario {
+            before_pack: 4,
             listings: vec![vec![4], vec![4, 7, 9]],
             chain: vec![5, 10],
             writes: vec![7],
@@ -810,6 +844,7 @@ mod tests {
     fn never_listed() {
         let mut run = Run::default();
         let scenario = Scenario {
+            before_pack: 4,
             listings: vec![vec![4]],
             chain: vec![5],
             writes: vec![7],
