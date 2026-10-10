@@ -56,8 +56,9 @@ pub fn digest(bytes: &[u8]) -> String {
 pub struct PackEntry {
     /// Track number on the bucket's tape
     ///
-    /// Recorded so reads go straight to `track_pda(tape, track)`. Resolving by
-    /// content hash would make the node scan every track on the tape per lookup.
+    /// A reader takes the track's address from its listing of the tape, which
+    /// carries every track with its number. Resolving by content hash would make
+    /// the node scan every track on the tape per lookup.
     pub track: u64,
 
     pub size: u64,

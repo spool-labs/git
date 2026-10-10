@@ -1,13 +1,15 @@
 //! Tapedrive side of the helper: read the index, read packs, write packs
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 
 use peer_http::HttpApi;
 use rpc_solana::{RpcConfig, SolanaRpc};
-use tape_api::program::tapedrive::track_pda;
+use tape_api::program::tapedrive::TrackAddress;
 use tape_core::types::{ContentType, StorageUnits, TrackNumber};
 use tape_crypto::ed25519::Keypair;
 use tape_crypto::hash::hash;
@@ -87,6 +89,13 @@ pub struct Store {
 
     /// Whether a fee payer was found. Reads do not need one, writes do.
     has_payer: bool,
+
+    /// Address of every track this process has listed or written, by track number
+    ///
+    /// A track's address is derived from its content, so the tape and a number
+    /// do not give it. Every number the helper reads comes from a listing of the
+    /// tape or from its own write, and both carry the track.
+    addresses: Mutex<HashMap<u64, Address>>,
 }
 
 /// Build an RPC handle over the configured endpoints, tried in order
@@ -201,7 +210,26 @@ impl Store {
             bucket,
             cassette,
             has_payer,
+            addresses: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Keep the address of a track that a listing or a write returned
+    fn remember(&self, track: TrackNumber, address: Address) {
+        self.addresses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(track.0, address);
+    }
+
+    /// The address of a track this process has listed or written
+    fn address_of(&self, track: TrackNumber) -> Result<Address> {
+        self.addresses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&track.0)
+            .copied()
+            .ok_or_else(|| anyhow!("track {} is in no listing of this tape yet", track.0))
     }
 
     /// Identity for a pack in `.git/tape/installed-packs`
@@ -238,12 +266,11 @@ impl Store {
     /// instead of failing. Rate limiting is expected rather than exceptional.
     /// Public gateways are throttled, and the right response is to honour
     /// `Retry-After` briefly and then stop leaning on someone else's capacity.
-    async fn gateway_bytes(&self, track: TrackNumber) -> Option<Vec<u8>> {
+    async fn gateway_bytes(&self, track: TrackNumber, address: &Address) -> Option<Vec<u8>> {
         let gateway = self.gateway.as_ref()?;
-        let address = track_pda(self.bucket, track).0;
 
         for attempt in 0..=GATEWAY_RATE_LIMIT_RETRIES {
-            match gateway.read_track(&address).await {
+            match gateway.read_track(address).await {
                 Ok(bytes) => return Some(bytes),
                 Err(TapedriveError::RateLimited { retry_after }) => {
                     if attempt == GATEWAY_RATE_LIMIT_RETRIES {
@@ -280,8 +307,9 @@ impl Store {
     /// speed and reachability without being trusted: one that is broken, stale, or
     /// actively lying simply loses.
     async fn read_track_proven(&self, track: TrackNumber) -> Result<Vec<u8>> {
-        if let Some(bytes) = self.gateway_bytes(track).await {
-            let address = track_pda(self.bucket, track).0;
+        let address = self.address_of(track)?;
+
+        if let Some(bytes) = self.gateway_bytes(track, &address).await {
             match self.sdk.verify(&address, &bytes).await {
                 Ok(true) => return Ok(bytes),
                 Ok(false) => eprintln!(
@@ -297,7 +325,7 @@ impl Store {
             }
         }
 
-        self.read_track(track).await
+        self.read_track(track, &address).await
     }
 
     /// Read one track's verified bytes straight from storage nodes
@@ -309,13 +337,12 @@ impl Store {
     /// serve its slices. Reading back something written seconds ago, which is
     /// exactly what a push does to confirm its own index, otherwise fails with
     /// "insufficient slices" on a track that is perfectly fine.
-    async fn read_track(&self, track: TrackNumber) -> Result<Vec<u8>> {
-        let address = track_pda(self.bucket, track).0;
+    async fn read_track(&self, track: TrackNumber, address: &Address) -> Result<Vec<u8>> {
         let mut last_error = None;
         let mut waited_ms = 0;
 
         for (attempt, backoff) in READ_BACKOFF_MS.iter().enumerate() {
-            match self.sdk.read(&address).await {
+            match self.sdk.read(address).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(error) => {
                     if attempt + 1 < READ_BACKOFF_MS.len() {
@@ -463,6 +490,7 @@ impl Store {
                 .await?;
 
             for track in &tracks {
+                self.remember(track.track_number, track.address());
                 if track.track_number.0 > highest.0 {
                     highest = track.track_number;
                 }
@@ -490,9 +518,9 @@ impl Store {
     /// we throw them away and go direct.
     pub async fn read_pack(&self, entry: &PackEntry, progress: &mut Progress) -> Result<Vec<u8>> {
         let track = TrackNumber(entry.track);
+        let address = self.address_of(track)?;
 
         if entry.stream {
-            let address = track_pda(self.bucket, track).0;
             // The SDK writes each chunk as it arrives, so the meter moves per chunk
             let mut buffer = MeteredBuffer { bytes: Vec::new(), progress };
             self.sdk
@@ -509,7 +537,7 @@ impl Store {
             return Ok(bytes);
         }
 
-        if let Some(bytes) = self.gateway_bytes(track).await {
+        if let Some(bytes) = self.gateway_bytes(track, &address).await {
             if entry.matches(&bytes) {
                 progress.advance(bytes.len() as u64);
                 return Ok(bytes);
@@ -521,7 +549,7 @@ impl Store {
             );
         }
 
-        let bytes = self.read_track(track).await?;
+        let bytes = self.read_track(track, &address).await?;
         if !entry.matches(&bytes) {
             bail!(
                 "pack at track {} does not match the digest the index recorded",
@@ -550,6 +578,7 @@ impl Store {
                 .write_stream(key, StorageUnits::from_bytes(size), pack)
                 .await
                 .map_err(|error| anyhow!("write pack stream ({size} bytes): {error}"))?;
+            self.remember(receipt.manifest_track_number, receipt.manifest);
             (receipt.manifest_track_number, true)
         } else {
             let track = self
@@ -557,6 +586,7 @@ impl Store {
                 .write_track(key, pack)
                 .await
                 .map_err(|error| anyhow!("write pack ({size} bytes): {error}"))?;
+            self.remember(track.track_number, track.address());
             (track.track_number, false)
         };
 
@@ -585,6 +615,7 @@ impl Store {
             )
             .await
             .map_err(|error| anyhow!("write ref index: {error}"))?;
+        self.remember(track.track_number, track.address());
 
         Ok(track.track_number)
     }
