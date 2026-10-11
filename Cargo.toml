@@ -1,6 +1,6 @@
 [package]
 name = "tape-git-remote"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "git remote helper that stores repositories on Tapedrive: git clone/pull/push over tape://"
 license = "Apache-2.0"
@@ -19,12 +19,12 @@ path = "src/main.rs"
 [workspace]
 
 [dependencies]
-tape-sdk = "0.4"
-tape-api = "0.4"
-tape-core = "0.4"
-tape-crypto = "0.4"
-rpc-solana = { package = "tape-rpc-solana", version = "0.4" }
-peer-http = { package = "tape-peer-http", version = "0.4" }
+tape-sdk = "0.5"
+tape-api = "0.5"
+tape-core = "0.5"
+tape-crypto = "0.5"
+rpc-solana = { package = "tape-rpc-solana", version = "0.5" }
+peer-http = { package = "tape-peer-http", version = "0.5" }
 
 anyhow = "1.0"
 dirs = "5.0"
